@@ -295,7 +295,14 @@ export class Engine {
     if (!this.isPlaying()) {
       this.setPhase("READY");
       this.setPendingStart("manual");
-      this.log("info", "Autoplay armed — waiting for the song to start");
+      // A finished map is a normal end, not a failure: arm and wait for the
+      // next play instead of showing an error.
+      this.log(
+        "info",
+        this.playback?.ended
+          ? "This play has finished — arm and wait for the next one"
+          : "Autoplay armed — waiting for the song to start",
+      );
       return;
     }
     this.setPendingStart(null);

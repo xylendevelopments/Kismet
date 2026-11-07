@@ -206,8 +206,6 @@ export function playbackBlocker(game: SiteGame | null, playback: SitePlayback | 
     return "The play reports an empty chart.";
   }
 
-  if (playback.ended) return "The play has finished.";
-
   if (typeof game.K1keycode !== "number" && typeof game.K2keycode !== "number") {
     return "The site's tap keys could not be read from its settings.";
   }

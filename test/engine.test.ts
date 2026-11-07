@@ -234,6 +234,11 @@ describe("Engine: safety", () => {
     assert.equal(site.isDown(), false);
     assert.equal(engine.currentPhase, "READY");
 
+    // Finishing a map is not a failure: the monitor must not turn it into one.
+    env.advance(600);
+    assert.equal(engine.currentPhase, "READY", "a finished play must not become an error");
+    assert.equal(engine.lastErrorMessage, "", `unexpected error: ${engine.lastErrorMessage}`);
+
     engine.dispose();
   });
 
