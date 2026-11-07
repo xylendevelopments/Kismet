@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Kismet
-// @namespace    https://github.com/tussle1/Kismet
+// @namespace    https://github.com/xylendevelopments/Kismet
 // @version      2.0.0
-// @updateURL    https://raw.githubusercontent.com/tussle1/Kismet/main/release/kismet.user.js
-// @downloadURL  https://raw.githubusercontent.com/tussle1/Kismet/main/release/kismet.user.js
+// @updateURL    https://raw.githubusercontent.com/xylendevelopments/Kismet/main/release/kismet.user.js
+// @downloadURL  https://raw.githubusercontent.com/xylendevelopments/Kismet/main/release/kismet.user.js
 // @description  Kismet — its own cursor-and-click autoplay for webosu! (osu!standard in the browser). Drives the site's own input listeners; never uses the site's built-in Autoplay mod. Optional reproducible timing humanization.
 // @author       tussle1
 // @match        https://webosu-online.netlify.app/*
