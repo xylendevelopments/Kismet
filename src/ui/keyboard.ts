@@ -1,70 +1,74 @@
-import { humanizeCode } from "../util/helpers";
 import { el, setText } from "./dom";
 
 /**
- * Keyboard visualiser.
+ * Tap-key visualiser.
  *
- * Renders one cell per column showing the bound key, and lights a cell while
- * that column is held. It reflects the *automation's* state (what we actually
- * dispatched), which is the useful thing to watch: if a cell is lit but the
- * game's own receptor is not, the mapping is wrong.
+ * webosu! binds gameplay clicks to two key codes (Z and X by default, but its
+ * Input settings can rebind them) and judges a click on `keydown`. This strip
+ * shows those two keys, marks the one Kismet is driving, and lights it while the
+ * button is actually held.
  *
- * Cells are created once per key-count change and then only their `data-down`
- * attribute is toggled, so a dense 10K stream costs a handful of attribute
- * writes and no layout thrash.
+ * It reflects the *automation's* state — what we dispatched — which is the
+ * useful thing to watch: a lit key with nothing happening in the game means the
+ * site is not accepting input (its Autoplay mod is on, or the key was rebound).
+ *
+ * Cells are created once per key change and then only their `dataset` flags are
+ * toggled, so a spinning map costs a handful of attribute writes per second and
+ * no layout thrash.
  */
+
+export interface TapKeyCell {
+  /** Virtual key code, or null when unknown. */
+  code: number | null;
+  /** Which of the site's two taps this is. */
+  role: "primary" | "secondary";
+}
 
 export class KeyboardView {
   public readonly root: HTMLElement;
   private cells: HTMLElement[] = [];
   private labels: HTMLElement[] = [];
-  private keyCount = 0;
+  private signature = "";
 
   constructor() {
     this.root = el("div", { className: "wom-keys", dataset: { part: "keyboard" } });
   }
 
-  /** Rebuild cells when the key count or mapping changes. */
-  setMapping(codes: string[], keyCount: number): void {
-    if (this.keyCount === keyCount && this.cells.length === keyCount) {
-      // Same shape: just refresh the labels.
-      for (let i = 0; i < keyCount; i++) {
-        setText(this.labels[i], humanizeCode(codes[i] ?? "?"));
-      }
-      return;
-    }
+  /** Rebuild cells when the site's tap keys change. */
+  setKeys(keys: TapKeyCell[], active: "primary" | "secondary"): void {
+    const signature = keys.map((key) => `${key.role}:${key.code ?? "?"}`).join("|") + `#${active}`;
+    if (signature === this.signature) return;
+    this.signature = signature;
 
-    this.keyCount = keyCount;
     this.root.replaceChildren();
     this.cells = [];
     this.labels = [];
 
-    for (let i = 0; i < keyCount; i++) {
-      const label = el("span", { text: humanizeCode(codes[i] ?? "?") });
+    for (const key of keys) {
+      const name = keyLabel(key.code);
+      const label = el("span", { text: name });
       const cell = el("div", {
         className: "wom-key",
-        dataset: { down: "0", column: String(i) },
-        attrs: { title: `Column ${i + 1} → ${codes[i] ?? "unbound"}` },
+        dataset: {
+          down: "0",
+          active: key.role === active ? "1" : "0",
+          role: key.role,
+        },
+        attrs: {
+          title: `${key.role === "primary" ? "Primary" : "Secondary"} tap key → ${name}` +
+            (key.role === active ? " (driven by Kismet)" : ""),
+        },
       }, [label]);
-
-      // Very wide charts: shrink the font so 18K still fits.
-      if (keyCount > 10) cell.style.fontSize = "8.5px";
-      if (keyCount > 14) cell.style.height = "24px";
-
       this.cells.push(cell);
       this.labels.push(label);
       this.root.appendChild(cell);
     }
   }
 
-  /**
-   * Light the held columns.
-   * `held` is a Set so lookups are O(1); we only write attributes that changed.
-   */
-  setHeld(held: Set<number>): void {
-    for (let i = 0; i < this.cells.length; i++) {
-      const cell = this.cells[i];
-      const want = held.has(i) ? "1" : "0";
+  /** Light the key while it is held. */
+  setHeld(down: boolean): void {
+    for (const cell of this.cells) {
+      const want = down && cell.dataset.active === "1" ? "1" : "0";
       if (cell.dataset.down !== want) cell.dataset.down = want;
     }
   }
@@ -83,6 +87,32 @@ export class KeyboardView {
     this.root.replaceChildren();
     this.cells = [];
     this.labels = [];
-    this.keyCount = 0;
+    this.signature = "";
   }
+}
+
+/** `90` -> `"Z"`, `32` -> `"Space"`, `0`/null -> `"?"`. */
+export function keyLabel(code: number | null): string {
+  if (typeof code !== "number" || !Number.isFinite(code) || code <= 0) return "?";
+  if (code === 32) return "Space";
+  if (code === 27) return "Esc";
+  if (code === 13) return "Enter";
+  if (code === 9) return "Tab";
+  if (code === 16) return "Shift";
+  if (code === 17) return "Ctrl";
+  if (code === 18) return "Alt";
+  if (code >= 48 && code <= 57) return String.fromCharCode(code);
+  if (code >= 65 && code <= 90) return String.fromCharCode(code);
+  if (code >= 96 && code <= 105) return `Num${code - 96}`;
+  if (code >= 112 && code <= 123) return `F${code - 111}`;
+  const specials: Record<number, string> = {
+    186: ";", 187: "=", 188: ",", 189: "-", 190: ".", 191: "/", 192: "`",
+    219: "[", 220: "\\", 221: "]", 222: "'", 37: "←", 38: "↑", 39: "→", 40: "↓",
+  };
+  return specials[code] ?? `#${code}`;
+}
+
+/** Render `setText` in a label, kept for parity with the old view's API. */
+export function setKeyLabel(label: HTMLElement, code: number | null): void {
+  setText(label, keyLabel(code));
 }

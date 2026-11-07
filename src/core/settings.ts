@@ -1,8 +1,8 @@
 import {
   DEFAULT_SETTINGS,
+  DEFAULT_SPIN_RATE,
   LOOKAHEAD_MAX,
   LOOKAHEAD_MIN,
-  MAX_KEY_COUNT,
   OFFSET_MAX,
   OFFSET_MIN,
   STORAGE_KEY,
@@ -35,8 +35,8 @@ const LEGACY_HOTKEYS: Record<HotkeyAction, readonly string[]> = {
   toggleUI: ["F6", "KeyH"],
   start: ["F7"],
   pause: ["F8"],
-  stop: ["F9"],
-  emergency: ["F10"],
+  stop: ["F9", "KeyX"],
+  emergency: ["F10", "KeyZ"],
 };
 
 function migrateLegacyHotkeys(parsed: unknown): void {
@@ -114,7 +114,7 @@ export class SettingsManager {
       migrateLegacyAppearance(parsed);
       return this.sanitize(deepMerge(base, parsed));
     } catch (err) {
-      console.warn("[Autoplay] stored settings were unreadable, using defaults", err);
+      console.warn("[Kismet] stored settings were unreadable, using defaults", err);
       return base;
     }
   }
@@ -156,17 +156,16 @@ export class SettingsManager {
     // `enabled: true` is honoured, but an out-of-range strength cannot be.
     out.humanization = sanitizeHumanization(out.humanization);
 
-    // Key mappings: drop anything malformed rather than trusting it.
-    const clean: Record<string, string[]> = {};
-    for (const [keyCountRaw, codes] of Object.entries(out.input.keyMappings ?? {})) {
-      const keyCount = Number(keyCountRaw);
-      if (!Number.isInteger(keyCount) || keyCount < 1 || keyCount > MAX_KEY_COUNT) continue;
-      if (!Array.isArray(codes) || codes.length !== keyCount) continue;
-      if (!codes.every((code) => typeof code === "string" && code.length > 0)) continue;
-      clean[String(keyCount)] = codes.slice();
-    }
-    out.input.keyMappings = clean;
-    out.input.useSecondaryKeybind = !!out.input.useSecondaryKeybind;
+    // Input: which of the site's two tap keys to press, how long a click is
+    // held, and how fast a spinner is turned. All three are clamped — a corrupt
+    // store must not be able to make the cursor invisible or the tap key stick.
+    out.input.tapKey = out.input.tapKey === "secondary" ? "secondary" : "primary";
+    out.input.tapHold = clamp(num(out.input.tapHold, DEFAULT_SETTINGS.input.tapHold), 2, 60);
+    out.input.spinRate = clamp(
+      num(out.input.spinRate, DEFAULT_SPIN_RATE),
+      0.5,
+      12,
+    );
 
     const hotkeys = { ...DEFAULT_SETTINGS.input.hotkeys };
     for (const action of Object.keys(hotkeys) as HotkeyAction[]) {
@@ -264,27 +263,4 @@ function structuredCloneSafe<T>(value: T): T {
   } catch {
     return JSON.parse(JSON.stringify(value)) as T;
   }
-}
-
-/**
- * Detect hotkeys that collide with the site's own bindings.
- *
- * Our hotkeys are handled on `keydown` with `preventDefault`, but the site's
- * `InputSystem` also listens on `document` and would still see the event. If a
- * user binds KeyG to a column, pressing our "start" hotkey would also register a
- * note hit. We warn instead of silently misbehaving.
- */
-export function findHotkeyCollisions(
-  settings: Settings,
-  siteKeybinds: (string | null)[],
-): Array<{ action: HotkeyAction; code: string }> {
-  const siteCodes = new Set(siteKeybinds.filter((c): c is string => !!c));
-  const collisions: Array<{ action: HotkeyAction; code: string }> = [];
-
-  for (const [action, code] of Object.entries(settings.input.hotkeys) as Array<
-    [HotkeyAction, string]
-  >) {
-    if (siteCodes.has(code)) collisions.push({ action, code });
-  }
-  return collisions;
 }

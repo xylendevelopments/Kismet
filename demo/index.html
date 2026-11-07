@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Keyfall Sandbox — Web osu!mania automation demo</title>
+    <title>Kismet Sandbox — webosu! autoplay demo</title>
     <style>
       :root {
         --bg: #0b0c10;
@@ -42,7 +42,9 @@
       }
       button:hover { border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.08); }
       button.primary { border-color: color-mix(in srgb, var(--accent) 50%, transparent); font-weight: 650; }
-      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      button:disabled, select:disabled { opacity: 0.4; cursor: not-allowed; }
+      label.mod { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+      label.mod input { accent-color: var(--accent); }
 
       #banner {
         position: fixed; top: 0; left: 0; right: 0;
@@ -86,11 +88,11 @@
     <div id="banner">
       <span class="tag">Sandbox</span>
       <span>
-        This is <b>not</b> webosumania.com — it is a stub implementing the documented contract so the
-        <b>real, unmodified autoplay bundle</b> can be exercised here.
+        This is <b>not</b> webosu-online.netlify.app — it is a stub implementing the documented
+        contract so the <b>real, unmodified Kismet bundle</b> can be exercised here.
       </span>
-      <span>Press <code>Right Shift</code> to open or hide Keyfall.</span>
-      <span>Console: <code>Keyfall.diagnostics()</code></span>
+      <span>Press <code>Right Shift</code> for the panel.</span>
+      <span>Console: <code>Kismet.diagnostics()</code></span>
     </div>
 
     <div id="stage"><canvas id="game"></canvas></div>
@@ -100,6 +102,10 @@
       <button id="play" class="primary">Play</button>
       <button id="pause" disabled>Pause</button>
       <button id="quit" disabled>Quit</button>
+      <label class="mod">
+        <input type="checkbox" id="site-autoplay" />
+        site Autoplay
+      </label>
       <div class="spacer"></div>
       <span id="hint" style="font-size:11px;color:var(--dim)"></span>
     </div>
@@ -111,8 +117,7 @@
         <div class="row"><span>Score</span><span id="r-score">0</span></div>
         <div class="row"><span>Accuracy</span><span id="r-acc">0%</span></div>
         <div class="row"><span>Max combo</span><span id="r-combo">0</span></div>
-        <div class="row"><span>320 / 300 / 200</span><span id="r-hits">0 / 0 / 0</span></div>
-        <div class="row"><span>Miss</span><span id="r-miss">0</span></div>
+        <div class="row"><span>300 / 100 / 50 / 0</span><span id="r-hits">0 / 0 / 0 / 0</span></div>
         <div style="margin-top:16px;text-align:center">
           <button id="close-results">Back</button>
         </div>
@@ -120,29 +125,19 @@
     </div>
 
     <script src="./stub-game.js"></script>
-    <script src="/keyfall.js"></script>
+    <script src="/kismet.js"></script>
     <script>
       (function () {
         const canvas = document.getElementById("game");
-        const ctx = canvas.getContext("2d");
         const chartSelect = document.getElementById("chart");
         const playBtn = document.getElementById("play");
         const pauseBtn = document.getElementById("pause");
         const quitBtn = document.getElementById("quit");
+        const autoplayToggle = document.getElementById("site-autoplay");
         const hint = document.getElementById("hint");
         const results = document.getElementById("results");
 
         let game = null;
-        let rafId = null;
-
-        function resize() {
-          const dpr = window.devicePixelRatio || 1;
-          canvas.width = Math.floor(window.innerWidth * dpr);
-          canvas.height = Math.floor(window.innerHeight * dpr);
-          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        }
-        window.addEventListener("resize", resize);
-        resize();
 
         for (const name of window.STUB_CHARTS) {
           const option = document.createElement("option");
@@ -152,33 +147,18 @@
         }
 
         function updateHint() {
-          const name = chartSelect.value;
-          const keyCount = name.startsWith("4K") ? 4 : name.startsWith("7K") ? 7 : 10;
-          const codes = window.STUB_KEYBINDS[keyCount] || [];
-          hint.textContent = "Keys: " + codes.map((c) => c.replace("Key", "").replace("Semicolon", ";")).join("  ");
+          const info = window.STUB_CHART_INFO[chartSelect.value];
+          hint.textContent = info
+            ? `${info.artist} — ${info.title} [${info.version}] · OD ${info.od} · ${info.objects.length} objects`
+            : "";
         }
         chartSelect.addEventListener("change", updateHint);
         updateHint();
 
-        function draw() {
-          window.stubRender(ctx, game, window.innerWidth, window.innerHeight);
-          rafId = requestAnimationFrame(draw);
-        }
-        draw();
-
-        function showResults(summary) {
-          document.getElementById("grade").textContent = grade(summary.accuracy);
-          document.getElementById("r-score").textContent = summary.score.toLocaleString();
-          document.getElementById("r-acc").textContent = (summary.accuracy * 100).toFixed(2) + "%";
-          document.getElementById("r-combo").textContent = summary.maxCombo + "x";
-          document.getElementById("r-hits").textContent =
-            summary.counts[320] + " / " + summary.counts[300] + " / " + summary.counts[200];
-          document.getElementById("r-miss").textContent = summary.counts.miss;
-          results.classList.add("show");
-        }
+        window.addEventListener("resize", () => game?.resize());
 
         function grade(accuracy) {
-          if (accuracy >= 1) return "SS";
+          if (accuracy >= 0.99) return "SS";
           if (accuracy >= 0.95) return "S";
           if (accuracy >= 0.9) return "A";
           if (accuracy >= 0.8) return "B";
@@ -186,17 +166,30 @@
           return "D";
         }
 
+        function showResults(summary) {
+          document.getElementById("grade").textContent = grade(summary.accuracy);
+          document.getElementById("r-score").textContent = summary.score.toLocaleString();
+          document.getElementById("r-acc").textContent = (summary.accuracy * 100).toFixed(2) + "%";
+          document.getElementById("r-combo").textContent = summary.maxCombo + "x";
+          document.getElementById("r-hits").textContent = [
+            summary.counts.great, summary.counts.good, summary.counts.meh, summary.counts.miss,
+          ].join(" / ");
+          results.classList.add("show");
+        }
+
         function setButtons(playing) {
           playBtn.disabled = playing;
           pauseBtn.disabled = !playing;
           quitBtn.disabled = !playing;
           chartSelect.disabled = playing;
+          autoplayToggle.disabled = playing;
         }
 
         playBtn.addEventListener("click", () => {
           if (game) game.dispose();
           game = new window.StubGame(chartSelect.value);
           game.mount(canvas);
+          game.game.autoplay = autoplayToggle.checked;
           game.onResults = (summary) => {
             setButtons(false);
             showResults(summary);
@@ -204,14 +197,15 @@
           game.start();
           setButtons(true);
           pauseBtn.textContent = "Pause";
+          hint.textContent = "Now press Right Shift and hit Start in the Kismet panel.";
         });
 
         pauseBtn.addEventListener("click", () => {
           if (!game) return;
-          if (game.state === "PLAY") {
+          if (game.audio.playing) {
             game.pause();
             pauseBtn.textContent = "Resume";
-          } else if (game.state === "PAUSE") {
+          } else {
             game.resume();
             pauseBtn.textContent = "Pause";
           }
@@ -228,16 +222,15 @@
         document.getElementById("close-results").addEventListener("click", () => {
           results.classList.remove("show");
           if (game) { game.dispose(); game = null; }
+          setButtons(false);
         });
 
         // Escape quits, matching the site's pause binding.
         document.addEventListener("keydown", (event) => {
           if (event.code !== "Escape" || !game) return;
-          if (game.state === "PLAY" || game.state === "PAUSE") {
-            game.dispose();
-            game = null;
-            setButtons(false);
-          }
+          game.dispose();
+          game = null;
+          setButtons(false);
         });
 
         window.demoStub = {

@@ -218,8 +218,8 @@ function harness(options: { lookahead?: number; spinThreshold?: number; ignoreCa
   };
 }
 
-function act(seq: number, time: number, type: "down" | "up", column = 0): InputAction {
-  return { seq, time, type, column, code: "KeyD", simultaneous: false, holdDuration: 0 };
+function act(seq: number, time: number, type: "down" | "up", objectIndex = 0): InputAction {
+  return { seq, time, type, objectIndex, x: 256, y: 192, simultaneous: false };
 }
 
 describe("Scheduler", () => {
@@ -245,7 +245,7 @@ describe("Scheduler", () => {
     const chordFire = h.fired.find((f) => f.actions.length === 3);
     assert.ok(chordFire, "expected one fire call carrying all three chord actions");
     assert.deepEqual(
-      chordFire.actions.map((a) => a.column),
+      chordFire.actions.map((a) => a.objectIndex),
       [0, 1, 2],
     );
   });

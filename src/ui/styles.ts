@@ -7,8 +7,8 @@ import { MOTION } from "./motion";
  * not bundled; the CSS prefers it when the user's system or the page has it.
  * A gradient and system fonts remain available when sources run directly in tests.
  */
-declare const __KEYFALL_COVER__: string;
-declare const __KEYFALL_FONT_CSS__: string;
+declare const __KISMET_COVER__: string;
+declare const __KISMET_FONT_CSS__: string;
 
 export const ROOT_CLASS = "wom-ap-root";
 export const STYLE_ID = "wom-ap-style";
@@ -16,8 +16,8 @@ export const STYLE_ID = "wom-ap-style";
 const MOSAIC = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='70' viewBox='0 0 150 70'%3E%3Cpath fill='%23fff' fill-opacity='.10' d='M0 0h32L9 27zM32 0h38L48 21zM70 0h32L86 26zM119 0h31v26zM0 39l23-21 21 34-24 18H0zM48 21l25 12-13 37H38zM101 22l23-22 26 34-19 36h-27l10-23z'/%3E%3Cpath fill='%23000' fill-opacity='.15' d='M9 27L32 0l16 21-4 31zM73 33L102 0l12 47-28 23H60zM124 0l26 26v8zM23 18l15 52H20zM114 47l17 23H86z'/%3E%3C/svg%3E";
 
 export function buildCss(accent: string): string {
-  const cover = typeof __KEYFALL_COVER__ === "undefined" ? "" : __KEYFALL_COVER__;
-  const fontCss = typeof __KEYFALL_FONT_CSS__ === "undefined" ? "" : __KEYFALL_FONT_CSS__;
+  const cover = typeof __KISMET_COVER__ === "undefined" ? "" : __KISMET_COVER__;
+  const fontCss = typeof __KISMET_FONT_CSS__ === "undefined" ? "" : __KISMET_FONT_CSS__;
   const artwork = cover
     ? `linear-gradient(0deg, rgba(26,20,35,.69), rgba(33,25,43,.12) 68%), url("${cover}")`
     : "linear-gradient(120deg, #a47597, #c2a0b6 38%, #739ba4 75%, #d8b899)";
@@ -40,7 +40,7 @@ ${fontCss}
   position: fixed;
   z-index: 2147483000;
   color: var(--wom-text);
-  font: 13px/1.35 "Torus", "Torus Regular", "Torus-Regular", "Keyfall Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  font: 13px/1.35 "Torus", "Torus Regular", "Torus-Regular", "Kismet Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
   text-align: left;
   letter-spacing: normal;
   -webkit-font-smoothing: antialiased;

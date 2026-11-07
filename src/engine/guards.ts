@@ -1,40 +1,40 @@
 import { STUCK_KEY_TIMEOUT } from "../constants";
-import type { GameLike } from "../types";
 
 /**
  * Safety guards.
  *
- * The single hard requirement this module exists to satisfy: **never leave a
- * key stuck**, under any failure mode — tab hidden, game disposed mid-hold,
- * beatmap changed, chart data lost, an exception in the input path, or the
- * user closing the tab.
+ * The single hard requirement this module exists to satisfy: **never leave the
+ * tap key stuck down**, under any failure mode — tab hidden, window blurred,
+ * play closed mid-slider, beatmap changed, chart data lost, an exception in the
+ * input path, or the user closing the tab.
  *
- * Every guard here is independent and idempotent, and every one of them routes
- * to the same `onPanic` callback so the engine performs one safe shutdown.
+ * Every guard here is independent and idempotent, and each routes to one of two
+ * callbacks: `onInterrupt` (stop driving, release, but keep the session so the
+ * user can resume) or `onPanic` (stop the session entirely).
  */
 
 export interface GuardHooks {
-  /** Release all held keys right now. Must be safe to call at any time. */
+  /** Release the tap key right now. Must be safe to call at any time. */
   releaseAll: () => void;
+  /** Pause: release, stop driving, keep the prepared chart. */
+  onInterrupt: (reason: string) => void;
   /** Full safe shutdown with a user-visible reason. */
   onPanic: (reason: string) => void;
-  /** Cheap liveness probe: is the detected game still the live one? */
+  /** Cheap liveness probe: is the play we bound to still the live one? */
   isGameAlive: () => boolean;
   /** Current chart time, or null when unknown. */
   chartTime: () => number | null;
-  /** Currently held columns, for the stuck-key watchdog. */
-  heldColumns: () => number[];
-  /** When each held column was pressed, in chart time. */
-  heldSince: () => Map<number, number>;
-  /** A still-queued release for this held column, if one exists. */
-  pendingReleaseAt?: (column: number) => number | null;
+  /** Is the tap key currently held by us? */
+  isDown: () => boolean;
+  /** Chart time the current hold began, or null when nothing is held. */
+  heldSince: () => number | null;
   log?: (message: string) => void;
 }
 
 export interface GuardOptions {
   /** How often the watchdog runs. Deliberately slow — it is a backstop. */
   watchdogInterval?: number;
-  /** A hold longer than this with no scheduled release is considered stuck. */
+  /** A hold longer than this with no release is considered stuck. */
   stuckKeyTimeout?: number;
   win?: Window;
 }
@@ -49,8 +49,6 @@ export class Guards {
   /** Consecutive failed liveness probes before we escalate. */
   private deadProbeCount = 0;
   private static readonly DEAD_PROBE_LIMIT = 3;
-  /** Overdue releases get one watchdog interval to run after a long stall. */
-  private overdueRelease = new Map<number, number>();
 
   constructor(hooks: GuardHooks, options: GuardOptions = {}) {
     this.hooks = hooks;
@@ -68,63 +66,42 @@ export class Guards {
     this.installed = true;
     const win = this.opts.win;
 
-    // Tab hidden: the site pauses itself on `visibilitychange`, and background
-    // tabs get their timers throttled, which would wreck scheduling. Release
-    // keys and let the engine pause cleanly.
-    this.add(
-      win.document,
-      "visibilitychange",
-      () => {
-        if (win.document.hidden) {
-          this.hooks.log?.("tab hidden — releasing keys");
-          this.hooks.releaseAll();
-          this.hooks.onPanic("Tab hidden");
-        }
-      },
-      { passive: true },
-    );
+    // The site pauses itself on `blur`, and background tabs get their timers
+    // throttled, which would wreck scheduling. Release the button and pause.
+    this.add(win.document, "visibilitychange", () => {
+      if (win.document.hidden) {
+        this.hooks.log?.("tab hidden — releasing the tap key");
+        this.hooks.releaseAll();
+        this.hooks.onInterrupt("Tab hidden");
+      }
+    }, { passive: true });
+
+    this.add(win, "blur", () => {
+      this.hooks.log?.("window blurred — releasing the tap key");
+      this.hooks.releaseAll();
+      this.hooks.onInterrupt("Window lost focus");
+    });
 
     // Navigating away or closing the tab: browsers do not reliably fire keyup
-    // for synthetic presses, and a held key can survive into the next page in
-    // some configurations. Release on the way out.
+    // for synthetic presses. Release on the way out.
     this.add(win, "pagehide", () => this.hooks.releaseAll());
     this.add(win, "beforeunload", () => this.hooks.releaseAll());
 
-    // Losing focus means real keyup events will never arrive for keys the user
-    // physically held, and our own scheduling is no longer trustworthy.
-    this.add(win, "blur", () => {
-      this.hooks.log?.("window blurred — releasing keys");
-      this.hooks.releaseAll();
-    });
-
-    // Any uncaught error anywhere in the tool: stop safely rather than
-    // continue driving input from a possibly inconsistent state.
+    // Any uncaught error anywhere in the tool: stop safely rather than keep
+    // driving input from a possibly inconsistent state.
     const onError = (event: ErrorEvent) => {
       const message = event?.message ?? "Unknown error";
-      // Only react to our own errors; the host page's errors are not ours to
-      // handle, and panicking on them would be rude.
-      if (typeof event?.filename === "string" && event.filename.length > 0) {
-        // Injected scripts usually report the page URL or a blob/inline source.
-        // We cannot reliably attribute, so we log and only panic if the engine
-        // is actively running and the game is gone.
-        this.hooks.log?.(`window error observed: ${message}`);
-        if (!this.hooks.isGameAlive()) {
-          this.hooks.onPanic(`Uncaught error: ${message}`);
-        }
-        return;
+      this.hooks.log?.(`window error observed: ${message}`);
+      if (!this.hooks.isGameAlive()) {
+        this.hooks.releaseAll();
+        this.hooks.onPanic(`Uncaught error: ${message}`);
       }
-      this.hooks.onPanic(`Uncaught error: ${message}`);
     };
     this.add(win, "error", onError as EventListener);
-
-    this.add(win, "unhandledrejection", ((event: PromiseRejectionEvent) => {
-      this.hooks.log?.(`unhandled rejection: ${String(event?.reason)?.slice(0, 200)}`);
-    }) as EventListener);
 
     this.startWatchdog();
   }
 
-  /** Start the slow backstop loop. Only runs while installed. */
   startWatchdog(): void {
     if (this.watchdogHandle !== null) return;
     this.watchdogHandle = setInterval(() => this.tick(), this.opts.watchdogInterval) as unknown as number;
@@ -137,10 +114,11 @@ export class Guards {
     }
   }
 
-  private tick(): void {
+  /** One watchdog pass. Exposed for tests; normally driven by the interval. */
+  tick(): void {
     if (!this.installed) return;
 
-    // 1. Liveness: did the game go away (closed, retried, disposed)?
+    // 1. Liveness: did the play go away (quit, retry, song change)?
     if (!this.hooks.isGameAlive()) {
       this.deadProbeCount++;
       if (this.deadProbeCount >= Guards.DEAD_PROBE_LIMIT) {
@@ -152,41 +130,17 @@ export class Guards {
     }
     this.deadProbeCount = 0;
 
-    // 2. Stuck keys: long holds are valid when their scheduled release is
-    //    still ahead. If a very long main-thread stall makes the watchdog wake
-    //    before an overdue scheduler/tap timer, give it one cycle to catch up.
+    // 2. Stuck click: a hold far longer than any slider or spinner body.
+    if (!this.hooks.isDown()) return;
     const chartTime = this.hooks.chartTime();
-    if (chartTime === null) return;
+    const since = this.hooks.heldSince();
+    if (chartTime === null || since === null) return;
+    const heldFor = chartTime - since;
+    if (heldFor <= this.opts.stuckKeyTimeout) return;
 
-    const heldSince = this.hooks.heldSince();
-    for (const column of this.overdueRelease.keys()) {
-      if (!heldSince.has(column)) this.overdueRelease.delete(column);
-    }
-    for (const [column, since] of heldSince) {
-      const heldFor = chartTime - since;
-      if (heldFor <= this.opts.stuckKeyTimeout) {
-        this.overdueRelease.delete(column);
-        continue;
-      }
-      const pending = this.hooks.pendingReleaseAt?.(column);
-      if (typeof pending === "number" && Number.isFinite(pending)) {
-        if (chartTime <= pending + this.opts.watchdogInterval * 2) {
-          this.overdueRelease.delete(column);
-          continue;
-        }
-        if (this.overdueRelease.get(column) !== since) {
-          this.overdueRelease.set(column, since);
-          this.hooks.log?.(`column ${column} has an overdue scheduled release — waiting for recovery`);
-          continue;
-        }
-      }
-      this.hooks.log?.(
-        `column ${column} held ${heldFor.toFixed(0)}ms with no release — forcing`,
-      );
-      this.hooks.releaseAll();
-      this.hooks.onPanic(`Stuck key detected on column ${column + 1}`);
-      return;
-    }
+    this.hooks.log?.(`tap key held ${heldFor.toFixed(0)}ms with no release — forcing`);
+    this.hooks.releaseAll();
+    this.hooks.onPanic("Stuck key detected");
   }
 
   private add(
@@ -213,41 +167,40 @@ export class Guards {
   dispose(): void {
     this.stopWatchdog();
     for (const dispose of this.disposers.splice(0)) {
-      dispose();
+      try {
+        dispose();
+      } catch {
+        /* already gone */
+      }
     }
-    this.overdueRelease.clear();
     this.installed = false;
   }
 }
 
 /**
- * Cross-check our view of held keys against the site's own.
+ * Cross-check our held state against the site's own.
  *
- * `game.inputSystem.pressedColumns` is the site's authoritative record of what
- * it believes is down. If we think a column is up but the site thinks it is
- * down (or vice versa) for several consecutive checks, our input path has
- * desynced — most likely because the keybinds changed mid-run — and continuing
- * would produce garbage. Returns a recommended action rather than acting, so
- * the caller stays in control.
+ * `game.K1down` / `game.K2down` are the site's authoritative record of what it
+ * believes is down. If we think the button is up but the site thinks it is down
+ * for several consecutive checks, our input path has desynced — most likely
+ * because the site's tap key was rebound mid-run — and continuing would produce
+ * garbage.
  */
 export function verifyInputState(
-  game: GameLike | null,
-  ourHeldColumns: Set<number>,
-): { ok: boolean; stuckInSite: number[]; stuckInOurs: number[] } {
-  const pressed = game?.inputSystem?.pressedColumns;
-  if (!Array.isArray(pressed)) {
-    return { ok: true, stuckInSite: [], stuckInOurs: [] };
-  }
+  game: { K1down?: boolean; K2down?: boolean; down?: boolean; K1keycode?: number; K2keycode?: number } | null,
+  ourDown: boolean,
+  ourKeyCode: number,
+): { ok: boolean; siteDown: boolean } {
+  if (!game) return { ok: true, siteDown: false };
 
-  const stuckInSite: number[] = [];
-  const stuckInOurs: number[] = [];
+  // The site sets `down` from all four sources; only the key we press is ours.
+  // Mirror the site's own bookkeeping for the code we dispatch.
+  const isPrimary = game.K1keycode === ourKeyCode;
+  const isSecondary = game.K2keycode === ourKeyCode;
+  let siteDown: boolean;
+  if (isPrimary) siteDown = game.K1down === true;
+  else if (isSecondary) siteDown = game.K2down === true;
+  else return { ok: true, siteDown: false };
 
-  for (let column = 0; column < pressed.length; column++) {
-    const siteSaysDown = pressed[column] === true;
-    const weSayDown = ourHeldColumns.has(column);
-    if (siteSaysDown && !weSayDown) stuckInSite.push(column);
-    if (!siteSaysDown && weSayDown) stuckInOurs.push(column);
-  }
-
-  return { ok: stuckInSite.length === 0 && stuckInOurs.length === 0, stuckInSite, stuckInOurs };
+  return { ok: siteDown === ourDown, siteDown };
 }

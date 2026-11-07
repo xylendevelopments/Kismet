@@ -51,7 +51,7 @@ export class Emitter<Events> {
         handler(payload);
       } catch (err) {
         // A broken subscriber must never take the engine down.
-        console.error(`[Autoplay] emitter error on "${String(type)}"`, err);
+        console.error(`[Kismet] emitter error on "${String(type)}"`, err);
       }
     }
   }

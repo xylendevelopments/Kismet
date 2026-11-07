@@ -71,6 +71,9 @@ export class StubKeyboardEvent {
   readonly ctrlKey: boolean;
   readonly metaKey: boolean;
   readonly shiftKey: boolean;
+  /** Legacy key code, which is what webosu!'s input listeners compare. */
+  keyCode: number;
+  which: number;
   /** Synthetic events are never trusted, exactly like in a real browser. */
   readonly isTrusted = false;
   defaultPrevented = false;
@@ -92,6 +95,51 @@ export class StubKeyboardEvent {
     this.ctrlKey = Boolean(init.ctrlKey);
     this.metaKey = Boolean(init.metaKey);
     this.shiftKey = Boolean(init.shiftKey);
+    const keyCode = Number(init.keyCode);
+    this.keyCode = Number.isFinite(keyCode) ? keyCode : 0;
+    this.which = this.keyCode;
+  }
+
+  preventDefault(): void {
+    this.defaultPrevented = true;
+  }
+
+  stopPropagation(): void {
+    this.__propagationStopped = true;
+  }
+
+  stopImmediatePropagation(): void {
+    this.__propagationStopped = true;
+    this.__immediatePropagationStopped = true;
+  }
+}
+
+export class StubMouseEvent {
+  readonly type: string;
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly button: number;
+  readonly buttons: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly composed: boolean;
+  readonly timeStamp: number;
+  readonly isTrusted = false;
+  defaultPrevented = false;
+  __propagationStopped = false;
+  __immediatePropagationStopped = false;
+
+  constructor(type: string, init: Record<string, unknown> = {}) {
+    this.type = type;
+    this.clientX = Number(init.clientX ?? 0) || 0;
+    this.clientY = Number(init.clientY ?? 0) || 0;
+    this.button = Number(init.button ?? 0) || 0;
+    this.buttons = Number(init.buttons ?? 0) || 0;
+    this.bubbles = init.bubbles !== false;
+    this.cancelable = Boolean(init.cancelable);
+    this.composed = Boolean(init.composed);
+    const timestamp = Number(init.timeStamp);
+    this.timeStamp = Number.isFinite(timestamp) ? timestamp : performance.now();
   }
 
   preventDefault(): void {
@@ -406,7 +454,7 @@ export function installDom(options: { start?: number } = {}): StubEnvironment {
     document,
     innerWidth: 1920,
     innerHeight: 1080,
-    location: { hostname: "webosumania.com", href: "https://webosumania.com/" },
+    location: { hostname: "webosu-online.netlify.app", href: "https://webosu-online.netlify.app/" },
     localStorage: {
       getItem: (k: string) => store.get(k) ?? null,
       setItem: (k: string, v: string) => void store.set(k, String(v)),
@@ -441,6 +489,7 @@ export function installDom(options: { start?: number } = {}): StubEnvironment {
     performance: { now: () => clock },
     navigator: { getGamepads: () => [] },
     KeyboardEvent: StubKeyboardEvent,
+    MouseEvent: StubMouseEvent,
     Element: StubElement,
     Node: StubElement,
     __et: new StubEventTarget(),
@@ -477,6 +526,7 @@ export function installDom(options: { start?: number } = {}): StubEnvironment {
     ["document", document],
     ["performance", window.performance],
     ["KeyboardEvent", StubKeyboardEvent],
+    ["MouseEvent", StubMouseEvent],
     ["localStorage", window.localStorage],
     ["requestAnimationFrame", window.requestAnimationFrame],
     ["cancelAnimationFrame", window.cancelAnimationFrame],

@@ -92,7 +92,7 @@ export function createFastTask(): FastTask {
         try {
           fn();
         } catch (err) {
-          console.error("[Autoplay] scheduled task threw", err);
+          console.error("[Kismet] scheduled task threw", err);
         }
       };
 
@@ -345,12 +345,18 @@ export class Scheduler {
     return this.armedHandle === null ? 0 : 1;
   }
 
-  /** Next queued release for a held column, used only by the safety watchdog. */
-  nextReleaseAt(column: number): number | null {
+  /**
+   * Due time of the next queued release, used only by the safety watchdog.
+   *
+   * std holds exactly one button at a time, so this needs no key identity: the
+   * first `up` ahead of the cursor is the release that will end the current
+   * hold. `null` means no release is queued at all, which the watchdog treats as
+   * "still legitimate" until the stuck-key timeout expires.
+   */
+  nextReleaseAt(): number | null {
     if (!this.isRunning) return null;
     for (let i = this.cursor; i < this.actions.length; i++) {
-      const action = this.actions[i];
-      if (action.column === column) return action.type === "up" ? this.dueTime(i) : null;
+      if (this.actions[i].type === "up") return this.dueTime(i);
     }
     return null;
   }
@@ -648,7 +654,7 @@ export class Scheduler {
     } catch (err) {
       // Never let an input failure kill the loop; the engine's guards handle
       // escalation and key release.
-      console.error("[Autoplay] input dispatch failed", err);
+      console.error("[Kismet] input dispatch failed", err);
       this.hooks.log?.(`dispatch failed: ${(err as Error)?.message ?? err}`);
     }
   }

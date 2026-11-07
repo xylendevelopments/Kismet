@@ -1,132 +1,119 @@
-import type { EngineStats, GameLike } from "../types";
+import type { EngineStats, SitePlayback, SiteScoreOverlay } from "../types";
 
 /**
  * Statistics.
  *
- * The site already computes everything worth showing — score, combo, accuracy
- * and the per-judgement counts live on `game.scoreSystem`. Reading them is a
- * handful of property accesses and is exact, so we prefer that over
- * re-deriving accuracy ourselves or parsing the HUD text.
+ * The site already computes everything worth showing: score, combo and the
+ * per-judgement counts live on `playback.scoreOverlay` (see its
+ * `js/overlay/score.js`). Reading them is a handful of property accesses and is
+ * exact, so we prefer that over re-deriving accuracy or scraping the HUD.
  *
- * What we add on top is automation-side telemetry the site does not have:
- * how many actions we fired, how many notes remain, and how accurate our
- * *scheduling* was (jitter), which is the number that tells you whether the
- * timing model is healthy.
+ * What we add on top is automation-side telemetry the site does not have: how
+ * many objects remain, how many presses we dispatched, and how accurate our
+ * *scheduling* was (jitter) — the number that tells you whether the timing model
+ * is healthy.
  */
 
-/** The site's `ScoreSystem` stores judgement counts under numeric keys. */
-const JUDGEMENTS = [320, 300, 200, 100, 50, 0] as const;
-
 export interface JudgementCounts {
-  "320": number;
-  "300": number;
-  "200": number;
-  "100": number;
-  "50": number;
-  "0": number;
+  great: number;
+  good: number;
+  meh: number;
+  miss: number;
+  /** Objects the site has judged, misses included. */
   total: number;
 }
 
-export function readJudgements(game: GameLike | null): JudgementCounts {
-  const counts: JudgementCounts = {
-    "320": 0,
-    "300": 0,
-    "200": 0,
-    "100": 0,
-    "50": 0,
-    "0": 0,
-    total: 0,
-  };
-  const score = game?.scoreSystem as Record<string | number, unknown> | undefined;
-  if (!score) return counts;
+export function readJudgements(playback: SitePlayback | null): JudgementCounts {
+  const counts: JudgementCounts = { great: 0, good: 0, meh: 0, miss: 0, total: 0 };
+  const overlay = playback?.scoreOverlay;
+  if (!overlay) return counts;
 
-  let total = 0;
-  for (const judgement of JUDGEMENTS) {
-    const value = Number(score[judgement] ?? 0);
-    if (Number.isFinite(value) && value > 0) {
-      counts[String(judgement) as keyof JudgementCounts] = value;
-      total += value;
-    }
-  }
-  counts.total = total;
+  const judge = overlay.judgecnt ?? {};
+  counts.great = num(judge.great);
+  counts.good = num(judge.good);
+  counts.meh = num(judge.meh);
+  counts.miss = num(judge.miss);
+  counts.total = counts.great + counts.good + counts.meh + counts.miss;
   return counts;
 }
 
-/** Number of notes the site has actually judged (any judgement, incl. miss). */
-export function judgedCount(game: GameLike | null): number {
-  return readJudgements(game).total;
-}
-
-/** Perfect-ish hits, i.e. everything the site counted that was not a miss. */
-export function hitCount(game: GameLike | null): number {
-  const counts = readJudgements(game);
-  return counts.total - counts["0"];
+/** Objects the site has judged, any judgement including miss. */
+export function judgedCount(playback: SitePlayback | null): number {
+  return readJudgements(playback).total;
 }
 
 /**
- * Accuracy as a 0..1 fraction, or null when the site has not scored anything
- * yet. We read the site's own value so the displayed number is always the one
- * the results screen will show.
+ * Accuracy as a 0..1 fraction, or null before anything has been judged.
+ *
+ * Uses the site's own running totals (`judgeTotal / maxJudgeTotal`) because
+ * that is the number its results screen will show — slider tick and end
+ * weighting included. Falls back to a plain weighted mean when an older build
+ * does not expose the totals.
  */
-export function readAccuracy(game: GameLike | null): number | null {
-  const raw = (game?.scoreSystem as any)?.accuracy;
-  if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
-  // The site stores 1 for 100%; guard against a percentage-shaped value.
-  return raw > 1.5 ? raw / 100 : raw;
+export function readAccuracy(playback: SitePlayback | null): number | null {
+  const overlay: SiteScoreOverlay | undefined = playback?.scoreOverlay;
+  if (!overlay) return null;
+
+  const judgeTotal = Number(overlay.judgeTotal);
+  const maxJudgeTotal = Number(overlay.maxJudgeTotal);
+  if (Number.isFinite(judgeTotal) && Number.isFinite(maxJudgeTotal) && maxJudgeTotal > 0) {
+    return Math.min(1, Math.max(0, judgeTotal / maxJudgeTotal));
+  }
+
+  const counts = readJudgements(playback);
+  if (counts.total === 0) return null;
+  const weighted = counts.great * 300 + counts.good * 100 + counts.meh * 50;
+  return weighted / (counts.total * 300);
 }
 
-export function readCombo(game: GameLike | null): number {
-  const raw = (game?.scoreSystem as any)?.combo;
-  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+export function readCombo(playback: SitePlayback | null): number {
+  const value = Number(playback?.scoreOverlay?.combo);
+  return Number.isFinite(value) ? value : 0;
 }
 
-export function readScore(game: GameLike | null): number | null {
-  const raw = (game?.scoreSystem as any)?.score;
-  return typeof raw === "number" && Number.isFinite(raw) ? Math.round(raw) : null;
+export function readScore(playback: SitePlayback | null): number | null {
+  const value = Number(playback?.scoreOverlay?.score);
+  return Number.isFinite(value) ? Math.round(value) : null;
 }
 
 /**
  * Assemble the full stats snapshot shown in the overlay.
  *
  * Called on the UI refresh interval, not per frame, and allocates exactly one
- * object — the readout is the only place we build a fresh snapshot.
+ * object.
  */
 export function collectStats(input: {
-  game: GameLike | null;
-  notesTotal: number;
-  notesRemaining: number;
-  actionsFired: number;
-  pressesDown: number;
-  releasesUp: number;
+  playback: SitePlayback | null;
+  objectsTotal: number;
+  objectsRemaining: number;
+  taps: number;
   timeElapsed: number;
   lastJitter: number;
   avgJitter: number;
+  holding: boolean;
 }): EngineStats {
-  const { game } = input;
+  const counts = readJudgements(input.playback);
   return {
-    notesTotal: input.notesTotal,
-    notesRemaining: input.notesRemaining,
-    actionsFired: input.actionsFired,
-    pressesDown: input.pressesDown,
-    releasesUp: input.releasesUp,
-    hits: hitCount(game),
-    combo: readCombo(game),
-    accuracy: readAccuracy(game),
-    score: readScore(game),
+    objectsTotal: input.objectsTotal,
+    objectsRemaining: input.objectsRemaining,
+    taps: input.taps,
     timeElapsed: input.timeElapsed,
+    hits: counts.total,
+    judgedGood: counts.total - counts.miss,
+    combo: readCombo(input.playback),
+    accuracy: readAccuracy(input.playback),
+    score: readScore(input.playback),
     lastJitter: input.lastJitter,
     avgJitter: input.avgJitter,
+    holding: input.holding,
   };
 }
 
 /**
- * Notes remaining, counted in *notes* rather than actions.
+ * Objects remaining, counted in objects rather than actions.
  * `notePressTimes` is sorted, so this is a binary search.
  */
-export function notesRemainingAt(
-  notePressTimes: number[],
-  chartTime: number,
-): number {
+export function notesRemainingAt(notePressTimes: number[], chartTime: number): number {
   let lo = 0;
   let hi = notePressTimes.length;
   while (lo < hi) {
@@ -135,4 +122,9 @@ export function notesRemainingAt(
     else hi = mid;
   }
   return notePressTimes.length - lo;
+}
+
+function num(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }

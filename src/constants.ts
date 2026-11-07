@@ -1,158 +1,61 @@
 import { DEFAULT_HUMANIZATION } from "./humanize/humanizer";
 import type { Settings } from "./types";
 
-export const NAME = "Keyfall";
-export const VERSION = "1.5.1";
+export const NAME = "Kismet";
+export const VERSION = "2.0.0";
+
+/** The site this tool drives. */
+export const SITE_NAME = "webosu!";
 
 /** The panel is deliberately available only from the physical Right Shift key. */
 export const UI_TOGGLE_CODE = "ShiftRight";
 
 /** localStorage key for persisted settings. Versioned so we can migrate. */
-export const STORAGE_KEY = "keyfall:settings:v1";
+export const STORAGE_KEY = "kismet:settings:v2";
 
 /**
- * Hostnames the tool considers "Web osu!mania".
+ * Hostnames Kismet treats as "webosu!".
  *
- * The site has moved hosts twice (Vercel -> Cloudflare Pages -> custom domain),
- * so the check is a suffix match against known deployments rather than an
- * equality check on one domain. Unknown-but-plausible hosts are reported as
- * "possible" so the UI can offer an override instead of dead-ending the user.
+ * webosu! is a static site that has been deployed on several hosts over its
+ * life. The check is an equality/suffix match against known deployments rather
+ * than a single domain, so a mirror does not silently disable the tool.
  */
 export const KNOWN_HOSTS = [
-  "webosumania.com",
-  "www.webosumania.com",
-  "web-osu-mania.pages.dev",
-  "web-osu-mania.vercel.app",
+  "webosu-online.netlify.app",
+  "webosu.online",
+  "www.webosu.online",
 ];
 
-/** Localhost dev servers for the site's own repo (`npm run dev`). */
+/** Apex domains whose subdomains are also accepted (preview deployments). */
+export const KNOWN_APEXES = ["webosu.online"];
+
+/** Localhost dev servers for the site's own repo (`python -m http.server`). */
 export const DEV_HOST_PATTERN = /^(localhost|127\.0\.0\.1|\[::1\])$/;
 
 /**
- * Ashtonk!mania deployments. The live v2 build the adapter targets is
- * `v2-ashtonkmania.lokaux.workers.dev`; the pattern also recognises future
- * `vN-` deployments and subdomains of the main deployment.
+ * The playfield the site judges in. Every coordinate the game stores for a hit
+ * object — and every coordinate its input listeners read back — is in this
+ * 512x384 "osu! pixel" space, not in CSS pixels. `window.gfx` holds the
+ * letterboxed mapping between the two.
  */
-export const ASHTONK_HOSTS = [
-  "v2-ashtonkmania.lokaux.workers.dev",
-  "ashtonkmania.lokaux.workers.dev",
-];
-export const ASHTONK_HOST_PATTERN =
-  /^(?:v\d+-)?ashtonkmania\.lokaux\.workers\.dev$/i;
+export const PLAYFIELD = { width: 512, height: 384 } as const;
 
-/** Public global exported by Ashtonk!mania's app bootstrap. */
-export const ASHTONK_APP_GLOBAL = "AshtonkMania";
+/** The global the site publishes its game state on (see its `initgame.js`). */
+export const GAME_GLOBAL = "game";
 
-/** The global the site sets for the Pixi devtools extension while playing. */
-export const PIXI_APP_GLOBAL = "__PIXI_APP__";
+/** The global the site publishes the active `Playback` scene on. */
+export const PLAYBACK_GLOBAL = "playback";
 
-/** Key counts supported for mapping/UI. The site filters beyond this. */
-export const MIN_KEY_COUNT = 1;
-export const MAX_KEY_COUNT = 18;
+/** The global the site publishes its letterboxed playfield geometry on. */
+export const GFX_GLOBAL = "gfx";
 
-/**
- * Fallback keybind layout used only when the site's own keybinds cannot be
- * read AND the user has not configured a mapping. Mirrors the site's defaults
- * so that a fresh install behaves sensibly.
- * Index = keyCount - 1.
- */
-export const FALLBACK_KEYBINDS: (string | null)[][][] = [
-  [["Space"]], // 1K
-  [["KeyF"], ["KeyJ"]], // 2K
-  [["KeyF"], ["Space"], ["KeyJ"]], // 3K
-  [["KeyD"], ["KeyF"], ["KeyJ"], ["KeyK"]], // 4K
-  [["KeyD"], ["KeyF"], ["Space"], ["KeyJ"], ["KeyK"]], // 5K
-  [["KeyS"], ["KeyD"], ["KeyF"], ["KeyJ"], ["KeyK"], ["KeyL"]], // 6K
-  [["KeyS"], ["KeyD"], ["KeyF"], ["Space"], ["KeyJ"], ["KeyK"], ["KeyL"]], // 7K
-  [
-    ["KeyA"],
-    ["KeyS"],
-    ["KeyD"],
-    ["KeyF"],
-    ["KeyJ"],
-    ["KeyK"],
-    ["KeyL"],
-    ["Semicolon"],
-  ], // 8K
-  [
-    ["KeyA"],
-    ["KeyS"],
-    ["KeyD"],
-    ["KeyF"],
-    ["Space"],
-    ["KeyJ"],
-    ["KeyK"],
-    ["KeyL"],
-    ["Semicolon"],
-  ], // 9K
-  [
-    ["KeyA"],
-    ["KeyS"],
-    ["KeyD"],
-    ["KeyF"],
-    ["KeyV"],
-    ["KeyN"],
-    ["KeyJ"],
-    ["KeyK"],
-    ["KeyL"],
-    ["Semicolon"],
-  ], // 10K
-  // Web-Osu-Mania / Ashtonk!mania 11K–18K defaults (MIT © 2024 Danny Duong).
-  ...[
-    ["KeyA", "KeyS", "KeyD", "KeyF", "KeyV", "Space", "KeyN", "KeyJ", "KeyK", "KeyL", "Semicolon"],
-    ["KeyA", "KeyS", "KeyD", "KeyF", "KeyC", "KeyV", "KeyN", "KeyM", "KeyJ", "KeyK", "KeyL", "Semicolon"],
-    ["KeyA", "KeyS", "KeyD", "KeyF", "KeyC", "KeyV", "Space", "KeyN", "KeyM", "KeyJ", "KeyK", "KeyL", "Semicolon"],
-    ["KeyA", "KeyS", "KeyD", "KeyF", "KeyX", "KeyC", "KeyV", "KeyN", "KeyM", "Comma", "KeyJ", "KeyK", "KeyL", "Semicolon"],
-    ["KeyA", "KeyS", "KeyD", "KeyF", "KeyX", "KeyC", "KeyV", "Space", "KeyN", "KeyM", "Comma", "KeyJ", "KeyK", "KeyL", "Semicolon"],
-    ["KeyA", "KeyS", "KeyD", "KeyF", "KeyZ", "KeyX", "KeyC", "KeyV", "KeyN", "KeyM", "Comma", "Period", "KeyJ", "KeyK", "KeyL", "Semicolon"],
-    ["KeyA", "KeyS", "KeyD", "KeyF", "KeyZ", "KeyX", "KeyC", "KeyV", "Space", "KeyN", "KeyM", "Comma", "Period", "KeyJ", "KeyK", "KeyL", "Semicolon"],
-    ["KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyZ", "KeyX", "KeyC", "KeyV", "KeyN", "KeyM", "Comma", "Period", "KeyH", "KeyJ", "KeyK", "KeyL", "Semicolon"],
-  ].map((layout) => layout.map((code) => [code])),
-];
+/** The global the site publishes its Pixi application on, while playing. */
+export const APP_GLOBAL = "app";
 
-export const DEFAULT_SETTINGS: Settings = {
-  general: {
-    enabled: true,
-    // Opt-in: an update must not start playing songs without user action.
-    autoStart: false,
-    // Legacy persisted flag; panel visibility is now transient and keyboard-only.
-    showOverlay: false,
-    showKeyboard: true,
-    debug: false,
-  },
-  timing: {
-    offset: 0,
-    lookahead: 120,
-    inputDelayCompensation: 0,
-    spinThreshold: 6,
-  },
-  input: {
-    keyMappings: {},
-    useSecondaryKeybind: false,
-    hotkeys: {
-      // Right Shift toggles the panel; G/B/X/Z are the existing action keys.
-      // High-key layouts may use some of these, so live collision detection
-      // warns the user to rebind action keys when necessary.
-      toggleUI: UI_TOGGLE_CODE,
-      start: "KeyG",
-      pause: "KeyB",
-      stop: "KeyX",
-      emergency: "KeyZ",
-    },
-  },
-  appearance: {
-    uiScale: 1,
-    opacity: 1,
-    accent: "#ff6b9d",
-    position: { x: 16, y: 16 },
-    collapsed: false,
-    size: { w: 427, h: 0 },
-  },
-  humanization: { ...DEFAULT_HUMANIZATION },
-};
+/** Upper bound on hit objects we are willing to mirror into a chart. */
+export const MAX_CHART_OBJECTS = 40_000;
 
-
-/** Timing offset slider bounds, per spec. */
+/** Timing offset slider bounds. */
 export const OFFSET_MIN = -200;
 export const OFFSET_MAX = 200;
 
@@ -169,16 +72,83 @@ export const DEBUG_FLUSH_INTERVAL = 150; // ms
 /**
  * Idle poll interval for *detection only*.
  *
- * Note this is deliberately NOT used for note scheduling — the spec forbids
- * per-note polling, and the scheduler uses precise timers instead. This single
- * slow timer exists purely to notice "a game started" / "a game ended".
+ * Deliberately NOT used for note scheduling — the scheduler uses precise
+ * timers instead. This single slow timer exists purely to notice
+ * "a play started" / "a play ended".
  */
-export const DETECT_POLL_INTERVAL = 700; // ms
+export const DETECT_POLL_INTERVAL = 500; // ms
 
-/** Safety: if a key has been held longer than this with no matching release
- *  action in the queue, force-release it. Guards against stuck keys when the
- *  chart or the site misbehaves. */
+/** Safety: if the tap key has been held this long with no release queued,
+ *  force it up. Guards against a stuck click if the chart or the site
+ *  misbehaves. */
 export const STUCK_KEY_TIMEOUT = 20_000; // ms
 
 /** Guard against runaway scheduling if the clock mapping goes non-monotonic. */
 export const MAX_CATCHUP_ACTIONS_PER_FRAME = 256;
+
+/**
+ * How long a circle's tap holds the key down.
+ *
+ * The site judges a circle on `keydown` alone, so this value never affects
+ * accuracy; it exists so the press looks like a press instead of a zero-length
+ * event, and so a second object inside the same window cannot be missed.
+ */
+export const DEFAULT_TAP_HOLD_MS = 12;
+
+/** Radius, in osu! pixels, the cursor orbits a spinner at. */
+export const SPIN_RADIUS = 60;
+
+/** Default spinner rotation, revolutions per second. */
+export const DEFAULT_SPIN_RATE = 4;
+
+/**
+ * Default keybind layout. Only used by the demo stub and as documentation —
+ * the real site always supplies its own tap keycodes
+ * (`game.K1keycode` / `game.K2keycode`), and Kismet reads those.
+ */
+export const FALLBACK_TAP_KEYCODES = { primary: 90, secondary: 88 }; // Z / X
+
+export const DEFAULT_SETTINGS: Settings = {
+  general: {
+    enabled: true,
+    // Opt-in: an update must not start playing songs without user action.
+    autoStart: false,
+    // Legacy persisted flag; panel visibility is transient and keyboard-only.
+    showOverlay: false,
+    showKeyboard: true,
+    debug: false,
+  },
+  timing: {
+    offset: 0,
+    lookahead: 120,
+    inputDelayCompensation: 0,
+    spinThreshold: 6,
+  },
+  input: {
+    /** Which of the site's two tap keys Kismet presses. */
+    tapKey: "primary",
+    /** Circle/press hold length, in ms. Does not affect judgement. */
+    tapHold: DEFAULT_TAP_HOLD_MS,
+    /** Spinner rotation, revolutions per second. */
+    spinRate: DEFAULT_SPIN_RATE,
+    hotkeys: {
+      // Right Shift toggles the panel. The action keys deliberately avoid the
+      // site's own defaults (Z and X for taps, Esc for pause, Ctrl for skip):
+      // a hotkey that doubles as a tap key would fire on every note.
+      toggleUI: UI_TOGGLE_CODE,
+      start: "KeyG",
+      pause: "KeyB",
+      stop: "KeyV",
+      emergency: "KeyP",
+    },
+  },
+  appearance: {
+    uiScale: 1,
+    opacity: 1,
+    accent: "#ff6b9d",
+    position: { x: 16, y: 16 },
+    collapsed: false,
+    size: { w: 427, h: 0 },
+  },
+  humanization: { ...DEFAULT_HUMANIZATION },
+};
