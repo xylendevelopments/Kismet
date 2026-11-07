@@ -5,22 +5,19 @@ import { listen } from "./ui/dom";
 /**
  * Hotkey handling.
  *
- * Two rules make this safe to run inside someone else's page:
+ * Three rules make this safe to run inside someone else's page:
  *
- *  1. Only *trusted* events count. Our own synthetic keypresses are dispatched
- *     on `document` with `bubbles: true`, so without this check an autoplay
- *     note on a column bound to (say) KeyG would trigger the "start" hotkey.
- *     `event.isTrusted` is the clean discriminator: real user input is trusted,
- *     script-generated input is not.
+ *  1. Only *trusted* events count. Kismet's own clicks are synthetic keydowns
+ *     on `window`; without this check, a tap key that shares a code with an
+ *     action would make the tool trigger itself.
  *
- *  2. Window capture + `stopImmediatePropagation`. Web osu!mania listens on
- *     document, while Ashtonk!mania listens on window capture and stops lane
- *     events there. Listening on window keeps stop/emergency hotkeys reachable
- *     even when a high-key layout uses the same code. Collision warnings still
- *     matter: if injected after the game's listener, it may see the key first.
+ *  2. Window capture, so the stop/emergency hotkeys stay reachable even if the
+ *     page stops propagation on its own gameplay keys.
  *
- * Collisions with the site's keybinds are detected and surfaced rather than
- * silently misbehaving.
+ *  3. A key that shares a code with one of the site's tap keys is *not*
+ *     swallowed: the action still fires (the tool must stay controllable) but
+ *     the event continues to the site, so the tap is not lost. The collision is
+ *     reported to the panel instead of silently double-binding.
  */
 
 export interface HotkeyHooks {
@@ -89,10 +86,13 @@ export class HotkeyManager {
       if (target && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable)) return;
     }
 
-    event.preventDefault();
-    // Stop later listeners on window too, not only propagation to document.
-    if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
-    else event.stopPropagation();
+    // A colliding key must keep reaching the site: swallowing it would eat a
+    // tap, and the panel already warns that the binding is a bad idea.
+    if (!this.hooks.getSiteCodes().includes(event.code)) {
+      event.preventDefault();
+      if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+      else event.stopPropagation();
+    }
     this.hooks.onAction(action);
   }
 

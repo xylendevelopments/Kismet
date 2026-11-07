@@ -7,7 +7,7 @@ import {
   OFFSET_MIN,
   STORAGE_KEY,
 } from "../src/constants";
-import { findHotkeyCollisions, SettingsManager } from "../src/core/settings";
+import { SettingsManager } from "../src/core/settings";
 import {
   formatDuration,
   formatTime,
@@ -191,26 +191,6 @@ describe("SettingsManager: humanization", () => {
     assert.equal(settings.all.humanization.enabled, true);
     assert.equal(settings.all.timing.lookahead, DEFAULT_SETTINGS.timing.lookahead);
     settings.dispose();
-  });
-});
-
-describe("findHotkeyCollisions", () => {
-  it("reports a hotkey bound to a gameplay key", () => {
-    const collisions = findHotkeyCollisions(DEFAULT_SETTINGS, ["KeyZ", "KeyX"]);
-    assert.deepEqual(collisions, []);
-    const custom = {
-      ...DEFAULT_SETTINGS,
-      input: {
-        ...DEFAULT_SETTINGS.input,
-        hotkeys: { ...DEFAULT_SETTINGS.input.hotkeys, start: "KeyZ" },
-      },
-    };
-    assert.deepEqual(findHotkeyCollisions(custom, ["KeyZ"]), [{ action: "start", code: "KeyZ" }]);
-  });
-
-  it("does not collide with the site's default tap keys", () => {
-    const collisions = findHotkeyCollisions(DEFAULT_SETTINGS, ["KeyZ", "KeyX"]);
-    assert.equal(collisions.length, 0);
   });
 });
 

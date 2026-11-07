@@ -389,9 +389,12 @@ describe("Right Shift hotkey", () => {
       },
     };
     hotkeys.apply(settings); hotkeys.install();
-    env.window.dispatchEvent(event("keydown", { code: "KeyZ", isTrusted: true, repeat: false }));
+    const key = event("keydown", { code: "KeyZ", isTrusted: true, repeat: false });
+    env.window.dispatchEvent(key);
     assert.deepEqual(actions, ["emergency"]);
     assert.deepEqual(hotkeys.currentCollisions.map((collision) => collision.code), ["KeyZ"]);
+    // A colliding key is still delivered to the site, so the tap is not eaten.
+    assert.equal(key.defaultPrevented, false);
     hotkeys.dispose();
     env.window.removeEventListener("keydown", stoppedLane, true);
   });

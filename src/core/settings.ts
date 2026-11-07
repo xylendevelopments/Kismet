@@ -264,26 +264,3 @@ function structuredCloneSafe<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
   }
 }
-
-/**
- * Detect hotkeys that collide with the site's own bindings.
- *
- * Our hotkeys are handled on `keydown` with `preventDefault`, but the site's
- * `InputSystem` also listens on `document` and would still see the event. If a
- * user binds KeyG to a column, pressing our "start" hotkey would also register a
- * note hit. We warn instead of silently misbehaving.
- */
-export function findHotkeyCollisions(
-  settings: Settings,
-  siteKeybinds: (string | null)[],
-): Array<{ action: HotkeyAction; code: string }> {
-  const siteCodes = new Set(siteKeybinds.filter((c): c is string => !!c));
-  const collisions: Array<{ action: HotkeyAction; code: string }> = [];
-
-  for (const [action, code] of Object.entries(settings.input.hotkeys) as Array<
-    [HotkeyAction, string]
-  >) {
-    if (siteCodes.has(code)) collisions.push({ action, code });
-  }
-  return collisions;
-}
