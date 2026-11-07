@@ -1,7 +1,6 @@
 import { NAME, VERSION } from "./constants";
 import { SettingsManager } from "./core/settings";
 import { Engine, SAFE_STOP_MESSAGE } from "./engine/engine";
-import { installOszSniffer, isSnifferInstalled } from "./detect/chartSource";
 import { NOT_DETECTED_MESSAGE } from "./detect/siteDetection";
 import { HotkeyManager } from "./hotkeys";
 import { Overlay } from "./ui/overlay";
@@ -15,14 +14,14 @@ import type { EngineStats, HotkeyAction } from "./types";
  * Wires detection, engine, overlay and hotkeys together, and exposes a small
  * console API for manual control and diagnostics:
  *
- *   window.Keyfall.start()
- *   window.Keyfall.stop()
- *   window.Keyfall.diagnostics()
- *   window.Keyfall.uninstall()
+ *   window.Kismet.start()
+ *   window.Kismet.stop()
+ *   window.Kismet.diagnostics()
+ *   window.Kismet.uninstall()
  */
 
-const GLOBAL_NAME = "Keyfall";
-const INSTANCE_FLAG = "__keyfallInstalled__";
+const GLOBAL_NAME = "Kismet";
+const INSTANCE_FLAG = "__kismetInstalled__";
 
 interface Bootstrapped {
   engine: Engine;
@@ -34,7 +33,7 @@ interface Bootstrapped {
 
 function boot(win: Window): Bootstrapped | null {
   // Guard against double injection (bookmarklet pressed twice, userscript
-  // re-run after SPA navigation, etc.).
+  // re-run after navigation, etc.).
   if ((win as any)[INSTANCE_FLAG]) {
     console.warn(`[${NAME}] already running — use ${GLOBAL_NAME}.uninstall() first`);
     return (win as any)[INSTANCE_FLAG] as Bootstrapped;
@@ -52,7 +51,6 @@ function boot(win: Window): Bootstrapped | null {
 
   function mountOverlay(): void {
     if (overlay) return;
-
     overlay = new Overlay(
       {
         onStart: () => engine.start(),
@@ -66,7 +64,6 @@ function boot(win: Window): Bootstrapped | null {
       },
       settings,
     );
-
     win.document.documentElement.appendChild(overlay.root);
   }
 
@@ -103,22 +100,14 @@ function boot(win: Window): Bootstrapped | null {
       }
     },
     getSiteCodes: () => {
-      // Check both the effective mapping and the site's primary/secondary
-      // bindings: a custom override does not stop a physical hotkey from
-      // colliding with a different key the game still listens to.
-      const effective = engine.currentMapping?.codes ?? [];
-      try {
-        const game = engine.currentGame;
-        const keyCount = engine.currentChart?.keyCount ?? 0;
-        const live = game?.columnKeybinds;
-        const stored = game?.settings?.keybinds?.keyModes?.[keyCount - 1];
-        const pairs = Array.isArray(live) && live.length === keyCount ? live : Array.isArray(stored) ? stored : [];
-        const siteCodes = pairs.flat().filter((code): code is string => typeof code === "string" && code.length > 0);
-        return [...effective, ...siteCodes];
-      } catch {
-        // The page may be tearing down its game while settings are changing.
-        return effective;
-      }
+      // The site's tap keys are real keyboard input from its point of view, so
+      // an action hotkey that shares one would fire on every click. Report the
+      // collision rather than silently double-binding the key.
+      const taps = engine.currentTapKeys;
+      const codes = [taps?.primary, taps?.secondary]
+        .filter((code): code is number => typeof code === "number" && Number.isFinite(code))
+        .map((code) => `Key${String.fromCharCode(code).toUpperCase()}`);
+      return codes;
     },
     isCapturing: () => overlay?.isCapturing ?? false,
     onCollision: (collisions) => {
@@ -129,25 +118,16 @@ function boot(win: Window): Bootstrapped | null {
         return;
       }
       const tip = collisions.some((collision) => collision.action === "toggleUI")
-        ? "Right Shift is fixed; change that binding in the game. Other action keys can be changed in More! → Input."
+        ? "Right Shift is fixed; change that binding in the site."
         : "Change the action keys in More! → Input.";
-      if (list !== reportedCollision) console.warn(`[${NAME}] hotkey collision with the site's keybinds: ${list}. ${tip}`);
+      if (list !== reportedCollision) console.warn(`[${NAME}] hotkey collision with the site's tap keys: ${list}. ${tip}`);
       reportedCollision = list;
-      overlay?.setNotice("warn", `Hotkey collision with site keybinds: ${list}. ${tip}`, "hotkey-collision");
+      overlay?.setNotice("warn", `Hotkey collision with the site's tap keys: ${list}. ${tip}`, "hotkey-collision");
     },
   });
 
   hotkeys.apply(settings.all);
   hotkeys.install();
-
-  /* --------------------------- fallback sniffer ------------------------- */
-
-  // Read-only observation of beatmap downloads. This is the safety net for
-  // chart data if the live game instance ever becomes unreachable; it never
-  // modifies a request.
-  const uninstallSniffer = installOszSniffer(win, {
-    onError: (err) => console.debug(`[${NAME}] sniffer`, err),
-  });
 
   /* ------------------------------ wiring ------------------------------- */
 
@@ -186,18 +166,21 @@ function boot(win: Window): Bootstrapped | null {
   );
 
   offs.push(
-    engine.on("detected", ({ chart, keyMapping, analysis, via }) => {
-      overlay?.setChart(chart, analysis, keyMapping);
+    engine.on("detected", ({ chart, tapKeys, analysis, via }) => {
+      overlay?.setChart(chart, analysis, tapKeys);
       overlay?.clearNotice();
-      if (keyMapping.source === "fallback") {
-        overlay?.setNotice("warn", "Using fallback key mapping. Check Input settings against the game's keys.");
+      if (tapKeys.source === "fallback") {
+        overlay?.setNotice("warn", "Using a fallback tap key. Check the site's Input settings and re-read the key.");
       }
       if (settings.all.general.debug) {
         overlay?.logDebug("info", `chart detected via ${via}`);
-        overlay?.logDebug("info", `keys ${chart.keyCount}, notes ${chart.noteCount}, actions ${analysis.chords} chord notes`);
         overlay?.logDebug(
           "info",
-          `mapping (${keyMapping.source}): ${keyMapping.codes.map((c) => humanizeCode(c)).join(" ")}`,
+          `${chart.noteCount} objects · ${chart.circles} circles · ${chart.sliders} sliders · ${chart.spinners} spinners`,
+        );
+        overlay?.logDebug(
+          "info",
+          `tap key ${tapKeys.code ?? "?"} (${tapKeys.active}, ${tapKeys.source}) · windows ${chart.windows.great.toFixed(0)}/${chart.windows.good.toFixed(0)}/${chart.windows.meh.toFixed(0)}ms`,
         );
       }
       hotkeys.apply(settings.all); // re-check collisions now that codes are known
@@ -208,9 +191,6 @@ function boot(win: Window): Bootstrapped | null {
     engine.on("timeline", ({ analysis, humanization }) => {
       overlay?.setAnalysis(analysis);
       overlay?.refreshHumanization();
-      // The chart did not change, but every action's timestamp may have. Refresh
-      // the pattern readout and, when debug is on, say so explicitly — a silent
-      // mid-run reshuffle would be confusing to diagnose otherwise.
       if (overlay && settings.all.general.debug) {
         overlay.logDebug(
           "info",
@@ -219,7 +199,7 @@ function boot(win: Window): Bootstrapped | null {
                 `sd ${humanization.sdMs.toFixed(2)}ms, ${humanization.clamped} clamped`
             : "timeline rebuilt: humanization off, timing frame-exact",
         );
-        overlay.logDebug("info", `patterns: ${analysis.jacks} jacks, ${analysis.chords} chord notes, peak ${analysis.peakNps} NPS`);
+        overlay.logDebug("info", `patterns: ${analysis.longestStream} longest stream, peak ${analysis.peakNps} NPS`);
       }
     }),
   );
@@ -241,8 +221,8 @@ function boot(win: Window): Bootstrapped | null {
   );
 
   offs.push(
-    engine.on("keyState", ({ heldColumns }) => {
-      overlay?.setHeldColumns(heldColumns);
+    engine.on("cursorState", ({ holding, keyCode }) => {
+      overlay?.setHolding(holding, keyCode);
     }),
   );
 
@@ -266,10 +246,9 @@ function boot(win: Window): Bootstrapped | null {
     const next = engine.getNextAction();
     diagnostics.stats = {
       ...(lastStats ?? {}),
-      timeElapsed: lastStats?.timeElapsed ?? diagnostics.timeElapsed,
-      nextNote: next ? formatTime(next.time) : "—",
-      nextColumn: next ? next.column + 1 : "—",
-      nextAction: next ? next.type.toUpperCase() : "—",
+      timeElapsed: lastStats?.timeElapsed ?? diagnostics.stats?.timeElapsed,
+      nextObject: next ? formatTime(next.time) : "—",
+      nextAction: next ? `${next.type.toUpperCase()} @ ${next.x.toFixed(0)},${next.y.toFixed(0)}` : "—",
     };
     overlay.setDebugSnapshot(overlay.buildDebugSnapshot(diagnostics));
   }
@@ -295,7 +274,6 @@ function boot(win: Window): Bootstrapped | null {
       }
     }
     hotkeys.dispose();
-    uninstallSniffer();
     unmountOverlay();
     engine.dispose();
     delete (win as any)[INSTANCE_FLAG];
@@ -324,14 +302,11 @@ function boot(win: Window): Bootstrapped | null {
     get chart() {
       return engine.currentChart;
     },
-    get mapping() {
-      return engine.currentMapping;
+    get tapKeys() {
+      return engine.currentTapKeys;
     },
     get overlayElement() {
       return overlay?.root ?? null;
-    },
-    get snifferInstalled() {
-      return isSnifferInstalled();
     },
     get uiVisible() {
       return overlay?.isVisible ?? false;
@@ -348,7 +323,8 @@ function boot(win: Window): Bootstrapped | null {
   (win as any)[INSTANCE_FLAG] = api;
 
   console.info(
-    `%c${NAME}%c v${VERSION} ready — ${settings.all.input.hotkeys.toggleUI} toggles the UI, ${settings.all.input.hotkeys.emergency} emergency-stops. Console API: ${GLOBAL_NAME}`,
+    `%c${NAME}%c v${VERSION} ready — ${settings.all.input.hotkeys.toggleUI} toggles the UI, ` +
+      `${settings.all.input.hotkeys.emergency} emergency-stops. Console API: ${GLOBAL_NAME}`,
     "color:#ff6b9d;font-weight:700",
     "color:inherit",
   );

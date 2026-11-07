@@ -51,6 +51,13 @@ export function formatTime(ms: number): string {
   return negative ? `-${body}` : body;
 }
 
+/** 1250 -> "1.25s", 240 -> "240ms". */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
 /** 2481 -> "2,481" without pulling in Intl for a hot path. */
 export function groupDigits(n: number): string {
   const s = String(Math.trunc(n));

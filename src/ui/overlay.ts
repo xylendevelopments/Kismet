@@ -1,22 +1,22 @@
 import {
   DEFAULT_SETTINGS,
+  DEFAULT_SPIN_RATE,
   LOOKAHEAD_MAX,
   LOOKAHEAD_MIN,
-  MAX_KEY_COUNT,
   NAME,
   OFFSET_MAX,
   OFFSET_MIN,
   UI_TOGGLE_CODE,
   VERSION,
 } from "../constants";
-import type { ChartAnalysis } from "../chart/timeline";
+import type { ChartAnalysis } from "../chart/chart";
 import type { SettingsManager } from "../core/settings";
 import type { HumanizationStats } from "../humanize/humanizer";
-import type { EnginePhase, EngineStats, HotkeyAction, KeyMapping, ParsedChart, Settings } from "../types";
-import { formatTime, groupDigits, humanizeCode, round } from "../util/helpers";
+import type { Chart, EnginePhase, EngineStats, HotkeyAction, Settings, TapKeys } from "../types";
+import { formatDuration, formatTime, groupDigits, humanizeCode, round } from "../util/helpers";
 import { DebugPanel } from "./debug";
 import { el, hexToRgba, listen, setDataset, setDisabled, setText } from "./dom";
-import { KeyboardView } from "./keyboard";
+import { KeyboardView, keyLabel } from "./keyboard";
 import { MOTION } from "./motion";
 import { ensureStyle, ROOT_CLASS } from "./styles";
 
@@ -34,7 +34,7 @@ export interface OverlayHost {
 
 type SettingsTab = "timing" | "humanize" | "input" | "appearance";
 type EditableHotkey = Exclude<HotkeyAction, "toggleUI">;
-type CaptureTarget = { kind: "mapping"; index: number } | { kind: "hotkey"; action: EditableHotkey };
+type CaptureTarget = { kind: "hotkey"; action: EditableHotkey };
 
 type SliderSpec = {
   label: string;
@@ -60,7 +60,7 @@ const HOTKEY_LABELS: Record<HotkeyAction, string> = {
 const TAB_INFO: Array<{ id: SettingsTab; label: string; first: string; second: string }> = [
   { id: "timing", label: "Timing", first: "Offset", second: "Scheduler" },
   { id: "humanize", label: "Humanize", first: "Variation", second: "Seed" },
-  { id: "input", label: "Input", first: "Keybinds", second: "Hotkeys" },
+  { id: "input", label: "Input", first: "Tap keys", second: "Hotkeys" },
   { id: "appearance", label: "Display", first: "Stats", second: "Appearance" },
 ];
 
@@ -111,7 +111,7 @@ export class Overlay {
   private readonly settingsManager: SettingsManager;
   private readonly disposers: Array<() => void> = [];
   private readonly bindings: Array<(settings: Settings) => void> = [];
-  private mappingDisposers: Array<() => void> = [];
+  private tapKeyDisposers: Array<() => void> = [];
   private hotkeyDisposers: Array<() => void> = [];
 
   private panel!: HTMLElement;
@@ -132,8 +132,8 @@ export class Overlay {
   private moreText!: HTMLElement;
   private drawer!: HTMLElement;
   private drawerScroll!: HTMLElement;
-  private mappingGrid!: HTMLElement;
-  private mappingHelp!: HTMLElement;
+  private tapKeyGrid!: HTMLElement;
+  private tapKeyHelp!: HTMLElement;
   private analysisEl!: HTMLElement;
   private hotkeyList!: HTMLElement;
   private humanizeSeed: HTMLInputElement | null = null;
@@ -151,9 +151,9 @@ export class Overlay {
   private visible = false;
   private phase: EnginePhase = "IDLE";
   private pendingStart = false;
-  private chart: ParsedChart | null = null;
-  private mapping: KeyMapping | null = null;
-  private mappingSignature = "";
+  private chart: Chart | null = null;
+  private tapKeys: TapKeys | null = null;
+  private tapKeySignature = "";
   private hotkeySignature = "";
   private listeningFor: CaptureTarget | null = null;
   private listeningCell: HTMLElement | null = null;
@@ -174,7 +174,7 @@ export class Overlay {
     this.root = el("div", {
       className: ROOT_CLASS,
       dataset: { part: "root", tool: NAME, open: "0", expanded: "0" },
-      attrs: { role: "region", "aria-label": "Keyfall autoplay controls", "aria-hidden": "true" },
+      attrs: { role: "region", "aria-label": `${NAME} autoplay controls`, "aria-hidden": "true" },
     });
     this.build();
     this.watchMotionPreference();
@@ -197,7 +197,7 @@ export class Overlay {
 
     this.heroTitle = el("div", { className: "wom-hero-title", text: "Waiting for gameplay…" });
     this.heroSubtitle = el("div", { className: "wom-hero-subtitle", text: "Open a chart to get started" });
-    this.heroBadge = el("span", { className: "wom-hero-badge", text: "— K" });
+    this.heroBadge = el("span", { className: "wom-hero-badge", text: "—" });
     this.statusValue = el("span", { className: "wom-hero-status", text: "DETECTING", dataset: { phase: "IDLE", part: "status" } });
     const hero = el("div", { className: "wom-hero", dataset: { part: "hero" } }, [
       this.statusValue,
@@ -224,7 +224,7 @@ export class Overlay {
     const quickSwitches = el("div", { className: "wom-quick-switches" }, [
       this.switchRow("Autoplay", "general.enabled", (s) => s.general.enabled),
       this.switchRow("Humanize", "humanization.enabled", (s) => s.humanization.enabled),
-      this.switchRow("Show keys", "general.showKeyboard", (s) => s.general.showKeyboard),
+      this.switchRow("Show tap keys", "general.showKeyboard", (s) => s.general.showKeyboard),
     ]);
     const quickGrid = el("div", { className: "wom-quick-grid" }, [quickReadouts, quickSwitches]);
 
@@ -233,7 +233,7 @@ export class Overlay {
       const button = el("button", {
         className: "wom-preset-button", type: "button", text: info.label,
         dataset: { tab: info.id },
-        attrs: { "aria-pressed": "false", "aria-controls": `keyfall-tab-${info.id}` },
+        attrs: { "aria-pressed": "false", "aria-controls": `kismet-tab-${info.id}` },
       });
       this.tabButtons.set(info.id, button);
       this.disposers.push(listen(button, "click", () => this.setTab(info.id)));
@@ -247,7 +247,7 @@ export class Overlay {
     this.moreText = el("span", { text: " More!" });
     this.moreBtn = el("button", {
       className: "wom-more-button", type: "button",
-      dataset: { part: "more" }, attrs: { "aria-expanded": "false", "aria-controls": "keyfall-settings" },
+      dataset: { part: "more" }, attrs: { "aria-expanded": "false", "aria-controls": "kismet-settings" },
     }, [el("span", { className: "wom-disclosure-icon", text: "▸", attrs: { "aria-hidden": "true" } }), this.moreText]);
     this.emergencyBtn = el("button", {
       className: "wom-emergency", type: "button", text: "Z · emergency",
@@ -259,7 +259,7 @@ export class Overlay {
     this.drawerScroll = el("div", { className: "wom-drawer-scroll" });
     for (const info of TAB_INFO) {
       const tabPanel = el("div", {
-        className: "wom-tab-panel", id: `keyfall-tab-${info.id}`,
+        className: "wom-tab-panel", id: `kismet-tab-${info.id}`,
         dataset: { tabPanel: info.id },
       });
       this.tabPanels.set(info.id, tabPanel);
@@ -267,7 +267,7 @@ export class Overlay {
       this.drawerScroll.appendChild(tabPanel);
     }
     this.drawer = el("div", {
-      className: "wom-drawer", id: "keyfall-settings", dataset: { part: "settings" },
+      className: "wom-drawer", id: "kismet-settings", dataset: { part: "settings" },
       attrs: { "aria-hidden": "true" },
     }, [el("div", { className: "wom-drawer-inner" }, [this.drawerScroll])]);
 
@@ -355,47 +355,57 @@ export class Overlay {
         el("div", { className: "wom-form-row" }, [el("span", { className: "wom-form-label", text: "Seed" }), seed, randomize]),
         el("div", { className: "wom-form-row" }, [el("span", { className: "wom-form-label", text: "Distribution" }), gaussian, uniform]),
         this.humanizeStatsEl,
-        el("p", { className: "wom-help", text: "For timing practice, not detection evasion. Keyfall's keyboard events are always synthetic." }),
+        el("p", { className: "wom-help", text: "For timing practice, not detection evasion. Kismet's events are always synthetic." }),
       );
       return;
     }
     if (tab === "input") {
       this.hotkeyList = el("div", { className: "wom-hotkeys" });
-      this.mappingGrid = el("div", { className: "wom-map-grid" });
-      this.mappingHelp = el("p", { className: "wom-help", text: "Start a chart to edit its column bindings." });
+      this.tapKeyGrid = el("div", { className: "wom-map-grid" });
+      this.tapKeyHelp = el("p", {
+        className: "wom-help",
+        text: "Start a play to read the site's tap keys.",
+      });
       const resetHotkeys = el("button", { className: "wom-small-button", type: "button", text: "Reset action hotkeys" });
-      const reread = el("button", { className: "wom-small-button", type: "button", text: "Re-read from site", dataset: { part: "reread" } });
+      const reread = el("button", {
+        className: "wom-small-button", type: "button", text: "Re-read from site", dataset: { part: "reread" },
+      });
       this.disposers.push(
         listen(resetHotkeys, "click", () => {
           this.settingsManager.set("input.hotkeys", { ...DEFAULT_SETTINGS.input.hotkeys });
           this.setConfirmation("Action hotkeys reset. Right Shift always opens and closes the panel.");
         }),
         listen(reread, "click", () => {
-          const keyCount = this.mapping?.keyCount;
-          if (keyCount) {
-            const overrides = { ...this.settingsManager.all.input.keyMappings };
-            delete overrides[String(keyCount)];
-            this.settingsManager.set("input.keyMappings", overrides);
-          }
           this.host.onRebindMapping();
-          this.setConfirmation("Key mapping re-read from the site.");
+          this.setConfirmation("Tap keys re-read from the site.");
         }),
       );
       panel.append(
         el("div", { className: "wom-section-title", text: "Hotkeys" }),
         el("p", { className: "wom-help", text: "Click an action key and press a replacement. Escape cancels. Right Shift is reserved for this window." }),
         this.hotkeyList, resetHotkeys,
-        el("div", { className: "wom-section-title wom-section-gap", text: "Column mapping" }),
-        this.mappingHelp, this.mappingGrid, reread,
-        this.switchRow("Use secondary keybinds", "input.useSecondaryKeybind", (s) => s.input.useSecondaryKeybind),
+        el("div", { className: "wom-section-title wom-section-gap", text: "Tap keys" }),
+        this.tapKeyHelp, this.tapKeyGrid, reread,
+        el("p", { className: "wom-help", text: "These are the site's own gameplay keys, read live from its Input settings. Click one to make Kismet press it. Rebind them in the site's settings, not here." }),
+        el("div", { className: "wom-section-title wom-section-gap", text: "Cursor" }),
+        this.sliderRow({
+          label: "Tap hold", path: "input.tapHold", min: 2, max: 60, step: 1,
+          initial: DEFAULT_SETTINGS.input.tapHold, read: (s) => s.input.tapHold, unit: "ms", wide: true,
+          title: "How long a circle press is held. Never affects judgement.",
+        }),
+        this.sliderRow({
+          label: "Spin speed", path: "input.spinRate", min: 0.5, max: 12, step: 0.5,
+          initial: DEFAULT_SPIN_RATE, read: (s) => s.input.spinRate, unit: " rev/s", wide: true,
+          title: "How fast the cursor orbits a spinner. Higher is safer for long spins.",
+        }),
       );
       return;
     }
 
     const metricsGrid = el("div", { className: "wom-metrics" });
     for (const [key, label] of [
-      ["notes", "Notes left"], ["accuracy", "Accuracy"], ["combo", "Combo"], ["score", "Score"],
-      ["actions", "Actions"], ["jitter", "Jitter"], ["time", "Time"], ["keys", "Keys"],
+      ["notes", "Objects left"], ["accuracy", "Accuracy"], ["combo", "Combo"], ["score", "Score"],
+      ["actions", "Taps"], ["jitter", "Jitter"], ["time", "Time"], ["mode", "Mode"],
     ]) {
       const value = el("div", { className: "wom-metric-v", text: "—", dataset: { metric: key } });
       this.metrics[key] = value;
@@ -433,7 +443,7 @@ export class Overlay {
       listen(resetSettings, "click", () => {
         this.settingsManager.reset();
         this.host.onRebindMapping();
-        this.setConfirmation("Keyfall settings reset to defaults.");
+        this.setConfirmation(`${NAME} settings reset to defaults.`);
       }),
     );
     panel.append(
@@ -442,14 +452,14 @@ export class Overlay {
       el("div", { className: "wom-section-title wom-section-gap", text: "Appearance" }),
       scale, opacity,
       el("div", { className: "wom-form-row" }, [el("span", { className: "wom-form-label", text: "Accent" }), color, resetPosition]),
-      this.switchRow("Show keyboard", "general.showKeyboard", (s) => s.general.showKeyboard),
+      this.switchRow("Show tap keys", "general.showKeyboard", (s) => s.general.showKeyboard),
       this.switchRow("Debug mode", "general.debug", (s) => s.general.debug),
       resetSettings, this.debug.root,
     );
   }
 
   private sliderRow(spec: SliderSpec): HTMLElement {
-    const id = `keyfall-slider-${this.sliderSequence++}`;
+    const id = `kismet-slider-${this.sliderSequence++}`;
     const label = el("label", { className: "wom-slider-label", text: spec.label, attrs: { for: id } });
     const value = el("span", { className: "wom-slider-value" });
     const input = el("input", {
@@ -597,27 +607,63 @@ export class Overlay {
     }
   }
 
-  private renderMappingGrid(force = false): void {
-    if (!this.mappingGrid) return;
-    const mapping = this.mapping;
-    const signature = JSON.stringify(mapping ? [mapping.keyCount, mapping.source, mapping.codes] : null);
-    if (!force && signature === this.mappingSignature) return;
-    this.mappingSignature = signature;
-    for (const dispose of this.mappingDisposers.splice(0)) dispose();
-    this.mappingGrid.replaceChildren();
-    if (!mapping) {
-      setText(this.mappingHelp, "Start a chart to edit its column bindings.");
+  /**
+   * The site's two tap keys, as read from its own game object.
+   *
+   * Clicking a cell chooses which one Kismet presses. Rebuilding is keyed on the
+   * codes and the active choice, so a slider drag elsewhere costs nothing.
+   */
+  private renderTapKeys(force = false): void {
+    if (!this.tapKeyGrid) return;
+    const keys = this.tapKeys;
+    const signature = JSON.stringify(keys ? [keys.primary, keys.secondary, keys.active, keys.source] : null);
+    if (!force && signature === this.tapKeySignature) return;
+    this.tapKeySignature = signature;
+    for (const dispose of this.tapKeyDisposers.splice(0)) dispose();
+    this.tapKeyGrid.replaceChildren();
+
+    if (!keys) {
+      setText(this.tapKeyHelp, "Start a play to read the site's tap keys.");
       return;
     }
-    setText(this.mappingHelp, `${mapping.keyCount}K · ${mapping.source} mapping. These keys must also be accepted by the game. Editing stops an active run.`);
-    for (let index = 0; index < mapping.keyCount; index++) {
-      const code = mapping.codes[index] ?? "?";
+
+    setText(
+      this.tapKeyHelp,
+      keys.source === "site"
+        ? `Read from the site: ${keyLabel(keys.primary)} / ${keyLabel(keys.secondary)}. Kismet presses ${keyLabel(keys.code)}.`
+        : "The site's tap keys could not be read; using a fallback key.",
+    );
+
+    const roles: Array<{ role: "primary" | "secondary"; label: string }> = [
+      { role: "primary", label: "Primary" },
+      { role: "secondary", label: "Secondary" },
+    ];
+    for (const { role, label } of roles) {
+      const code = role === "primary" ? keys.primary : keys.secondary;
       const cell = el("button", {
-        className: "wom-map-cell", type: "button", dataset: { column: String(index), source: mapping.source, listening: "0" },
-        attrs: { title: `Column ${index + 1} → ${code}; click to rebind`, "aria-label": `Column ${index + 1}: ${humanizeCode(code)}` },
-      }, [el("span", { className: "wom-map-index", text: String(index + 1) }), el("span", { text: humanizeCode(code) })]);
-      this.mappingDisposers.push(listen(cell, "click", () => this.beginListen({ kind: "mapping", index }, cell)));
-      this.mappingGrid.appendChild(cell);
+        className: "wom-map-cell", type: "button",
+        dataset: {
+          column: role,
+          source: keys.source,
+          active: keys.active === role ? "1" : "0",
+          listening: "0",
+        },
+        attrs: {
+          title: `${label} tap key → ${keyLabel(code)}${keys.active === role ? " (presses this one)" : "; click to press this one"}`,
+          "aria-label": `${label} tap key: ${keyLabel(code)}`,
+        },
+      }, [
+        el("span", { className: "wom-map-index", text: label[0] }),
+        el("span", { text: keyLabel(code) }),
+      ]);
+      this.tapKeyDisposers.push(
+        listen(cell, "click", () => {
+          this.settingsManager.set("input.tapKey", role);
+          this.host.onRebindMapping();
+          this.setConfirmation(`Kismet now presses the ${label.toLowerCase()} tap key.`);
+        }),
+      );
+      this.tapKeyGrid.appendChild(cell);
     }
   }
 
@@ -659,25 +705,17 @@ export class Overlay {
       else event.stopPropagation();
       if (event.code === "Escape") { this.cancelListen(); return; }
       if (!event.code) return;
-      if (target.kind === "mapping") {
-        const keyCount = this.mapping?.keyCount ?? 0;
-        if (!keyCount || !this.mapping) { this.cancelListen(); return; }
-        const next = this.mapping.codes.slice();
-        next[target.index] = event.code;
-        this.settingsManager.set(`input.keyMappings.${keyCount}`, next);
-        this.host.onRebindMapping();
-      } else {
-        const taken = (Object.entries(this.settingsManager.all.input.hotkeys) as Array<[HotkeyAction, string]>)
-          .find(([other, code]) => code === event.code && other !== target.action);
-        if (taken) {
-          this.setNotice("warn", `${humanizeCode(event.code)} is already bound to ${HOTKEY_LABELS[taken[0]]}. Press another key or Esc.`);
-          return;
-        }
-        this.settingsManager.set(`input.hotkeys.${target.action}`, event.code);
+      const taken = (Object.entries(this.settingsManager.all.input.hotkeys) as Array<[HotkeyAction, string]>)
+        .find(([other, code]) => code === event.code && other !== target.action);
+      if (taken) {
+        this.setNotice("warn", `${humanizeCode(event.code)} is already bound to ${HOTKEY_LABELS[taken[0]]}. Press another key or Esc.`);
+        return;
       }
+      this.settingsManager.set(`input.hotkeys.${target.action}`, event.code);
       this.cancelListen();
     };
-    // Ashtonk handles and stops lane keys on window capture, before document.
+    // Capture phase: the site stops propagation on its own gameplay keys, and a
+    // capture listener still sees them.
     this.listenDisposer = listen(window, "keydown", onKey as EventListener, { capture: true });
   }
 
@@ -691,8 +729,7 @@ export class Overlay {
     }
     this.listeningCell = null;
     this.listeningFor = null;
-    if (target?.kind === "mapping") this.renderMappingGrid(true);
-    else if (target?.kind === "hotkey") this.renderHotkeyList(true);
+    if (target?.kind === "hotkey") this.renderHotkeyList(true);
   }
 
   get isCapturing(): boolean { return this.listeningFor !== null; }
@@ -799,7 +836,7 @@ export class Overlay {
     this.keyboard.setVisible(settings.general.showKeyboard);
     this.debug.setEnabled(settings.general.debug);
     this.renderHotkeyList();
-    this.renderMappingGrid();
+    this.renderTapKeys();
     this.syncHumanizeDistribution(settings.humanization.distribution);
     if (this.humanizeSeed && this.humanizeSeed.value !== String(settings.humanization.seed)) {
       this.humanizeSeed.value = String(settings.humanization.seed);
@@ -850,58 +887,76 @@ export class Overlay {
     this.startBtn.title = !enabled ? "Enable autoplay first"
       : running ? "Pause autoplay"
       : this.pendingStart ? "Cancel the queued start"
-      : "Start Keyfall's own autoplay";
+      : "Start Kismet's own autoplay";
     setText(this.startLabel, running ? "Pause autoplay" : this.pendingStart ? "Cancel queued start" : paused ? "Resume autoplay" : "Start autoplay");
     const hotkeys = this.settingsManager.all.input.hotkeys;
     const code = running ? hotkeys.pause : this.pendingStart ? hotkeys.stop : hotkeys.start;
     setText(this.startHint, `${humanizeCode(code)} · ${running ? "pause" : this.pendingStart ? "cancel" : paused ? "resume" : "start"}`);
   }
 
-  setChart(chart: ParsedChart | null, analysis: ChartAnalysis | null, mapping: KeyMapping | null): void {
+  setChart(chart: Chart | null, analysis: ChartAnalysis | null, tapKeys: TapKeys | null): void {
     this.chart = chart;
-    this.mapping = mapping;
+    this.tapKeys = tapKeys;
     this.setAnalysis(analysis);
     for (const metric of Object.values(this.metrics)) setText(metric, "—");
     for (const metric of Object.values(this.quickMetrics)) setText(metric, "—");
     if (!chart) {
       setText(this.heroTitle, "Waiting for gameplay…");
-      setText(this.heroSubtitle, "Open a chart to get started");
-      setText(this.heroBadge, "— K");
-      setText(this.metrics.keys, "—");
+      setText(this.heroSubtitle, "Open a beatmap in webosu! to get started");
+      setText(this.heroBadge, "—");
+      setText(this.metrics.mode, "—");
       for (const key of ["notes", "accuracy", "score"]) setText(this.quickMetrics[key], "—");
-      this.keyboard.setMapping([], 0);
+      this.keyboard.setKeys([], "primary");
     } else {
-      setText(this.heroTitle, chart.label ?? `${chart.keyCount}K chart`);
-      setText(this.heroSubtitle, `${chart.keyCount} keys · ${groupDigits(chart.noteCount)} notes${mapping?.source === "user" ? " · custom mapping" : ""}`);
-      setText(this.heroBadge, `${chart.keyCount}K`);
-      setText(this.metrics.keys, `${chart.keyCount}K`);
+      setText(this.heroTitle, chart.label ?? `${chart.noteCount} objects`);
+      setText(
+        this.heroSubtitle,
+        `${chart.circles} circles · ${chart.sliders} sliders · ${chart.spinners} spinners` +
+          (tapKeys ? ` · tap ${keyLabel(tapKeys.code)}` : ""),
+      );
+      setText(this.heroBadge, "STD");
+      setText(this.metrics.mode, `OD ${round(chart.difficulty.od, 1)}`);
       setText(this.metrics.notes, groupDigits(chart.noteCount));
       setText(this.quickMetrics.notes, groupDigits(chart.noteCount));
-      this.keyboard.setMapping(mapping?.codes ?? [], chart.keyCount);
+      if (tapKeys) {
+        this.keyboard.setKeys(
+          [
+            { code: tapKeys.primary, role: "primary" },
+            { code: tapKeys.secondary, role: "secondary" },
+          ],
+          tapKeys.active,
+        );
+      }
     }
-    this.renderMappingGrid();
+    this.renderTapKeys();
   }
 
   setAnalysis(analysis: ChartAnalysis | null): void {
     setText(this.analysisEl, analysis
-      ? `${groupDigits(analysis.taps)} taps · ${groupDigits(analysis.holds)} holds · ${groupDigits(analysis.chords)} chord notes · ${groupDigits(analysis.jacks)} jacks · peak ${round(analysis.peakNps, 1)} NPS`
+      ? `${groupDigits(analysis.circles)} circles · ${groupDigits(analysis.sliders)} sliders · ` +
+        `${groupDigits(analysis.spinners)} spinners · longest stream ${analysis.longestStream} · ` +
+        `peak ${round(analysis.peakNps, 1)} NPS · longest slider ${formatDuration(analysis.longestSlider)}`
       : "Pattern analysis appears when a chart is detected.");
   }
 
   setStats(stats: EngineStats): void {
-    const notes = groupDigits(stats.notesRemaining);
+    const notes = groupDigits(stats.objectsRemaining);
     const accuracy = stats.accuracy === null ? "—" : `${(stats.accuracy * 100).toFixed(2)}%`;
     const score = stats.score === null ? "—" : groupDigits(stats.score);
     setText(this.metrics.notes, notes); setText(this.quickMetrics.notes, notes);
     setText(this.metrics.accuracy, accuracy); setText(this.quickMetrics.accuracy, accuracy);
     setText(this.metrics.score, score); setText(this.quickMetrics.score, score);
     setText(this.metrics.combo, groupDigits(stats.combo));
-    setText(this.metrics.actions, groupDigits(stats.actionsFired));
+    setText(this.metrics.actions, groupDigits(stats.taps));
     setText(this.metrics.jitter, `${stats.lastJitter >= 0 ? "+" : ""}${stats.lastJitter.toFixed(1)}ms`);
     setText(this.metrics.time, formatTime(stats.timeElapsed));
   }
 
-  setHeldColumns(held: number[]): void { this.keyboard.setHeld(new Set(held)); }
+  /** Light the tap key cell while the button is held. */
+  setHolding(holding: boolean, _keyCode: number | null): void {
+    this.keyboard.setHeld(holding);
+  }
+
   setNotice(kind: "ok" | "warn" | "error", text: string, id = ""): void {
     this.noticeId = id;
     this.noticeEl.classList.remove("wom-hidden"); setDataset(this.noticeEl, "kind", kind); setText(this.noticeEl, text);
@@ -929,18 +984,26 @@ export class Overlay {
     const hum = diagnostics.humanization as any;
     const lines = ["[DEBUG]", `Phase: ${diagnostics.phase}`, `Detected via: ${diagnostics.via ?? "—"}`];
     if (chart) {
-      lines.push("Chart detected", `Keys: ${chart.keyCount}`, `Notes: ${groupDigits(chart.notes)}`,
-        `Actions: ${groupDigits(chart.actions)}`, `Chart: ${chart.label ?? "—"}`);
+      lines.push(
+        "Chart detected",
+        `Objects: ${groupDigits(chart.objects ?? 0)} (${chart.circles ?? 0}C/${chart.sliders ?? 0}S/${chart.spinners ?? 0}Sp)`,
+        `Actions: ${groupDigits(chart.actions)}`,
+        `OD ${round(chart.difficulty?.od ?? 0, 1)} · windows ${round(chart.windows?.great ?? 0, 0)}/${round(chart.windows?.good ?? 0, 0)}/${round(chart.windows?.meh ?? 0, 0)}ms`,
+        `Chart: ${chart.label ?? "—"}`,
+      );
     } else lines.push("Chart detected: no");
     lines.push(`Current time: ${stats ? formatTime(stats.timeElapsed) : "—"}`);
-    if (stats) lines.push(`Next note: ${stats.nextNote ?? "—"}`, `Column: ${stats.nextColumn ?? "—"}`, `Action: ${stats.nextAction ?? "—"}`);
+    if (stats) lines.push(`Next object: ${stats.nextObject ?? "—"}`, `Action: ${stats.nextAction ?? "—"}`);
+    const taps = diagnostics.tapKeys as any;
+    if (taps) lines.push(`Tap key: ${taps.code ?? "?"} (${taps.active}, ${taps.source})`);
     lines.push(`Clock: slope ${clock?.slope ?? "—"} · err ${clock?.errorMs ?? "—"}ms · samples ${clock?.samples ?? 0} · confident ${clock?.confident ? "yes" : "no"}`);
     lines.push(`Scheduler: cursor ${sched?.cursor ?? 0}/${sched?.total ?? 0} · armed ${sched?.armed ?? 0} · fired ${groupDigits(sched?.fired ?? 0)} · dropped ${sched?.dropped ?? 0}`);
     lines.push(`Jitter: last ${round(sched?.jitter?.last ?? 0, 2)}ms · avg ${round(sched?.jitter?.avg ?? 0, 2)}ms`);
-    lines.push(`Input: held ${input?.held ?? 0} · down ${groupDigits(input?.down ?? 0)} · up ${groupDigits(input?.up ?? 0)} · dup ${input?.duplicatesSuppressed ?? 0} · fail ${input?.failures ?? 0}`);
-    if (hum?.enabled) {
-      lines.push(`Humanize: seed ${hum.seed} · ${hum.distribution} · strength ${hum.strength} · mean ${hum.meanMs}ms · sd ${hum.sdMs}ms · range ${hum.minMs}…${hum.maxMs}ms · clamped ${hum.clamped}`);
-      lines.push(`Patterns: ${hum.patterns?.jacks ?? 0} jacks · ${hum.patterns?.streams ?? 0} streams · ${hum.patterns?.chords ?? 0} chord notes · ${hum.patterns?.holds ?? 0} holds · ${hum.patterns?.isolated ?? 0} isolated`);
+    lines.push(`Pointer: ${input?.holding ? "down" : "up"} · moves ${groupDigits(input?.moves ?? 0)} · presses ${groupDigits(input?.presses ?? 0)} · releases ${groupDigits(input?.releases ?? 0)} · fail ${input?.failures ?? 0}`);
+    lines.push(`Cursor: ${round(input?.cursor?.x ?? 0, 1)}, ${round(input?.cursor?.y ?? 0, 1)} · max error ${input?.maxMoveError ?? 0}px`);
+    if (hum?.notes) {
+      lines.push(`Humanize: ${hum.notes} objects · mean ${round(hum.meanMs, 2)}ms · sd ${round(hum.sdMs, 2)}ms · range ${round(hum.minMs, 1)}…${round(hum.maxMs, 1)}ms · clamped ${hum.clamped}`);
+      lines.push(`Patterns: ${hum.patterns?.dense ?? 0} dense · release clamped ${hum.releaseClamped ?? 0}`);
     } else lines.push("Humanize: off (frame-exact)");
     lines.push(`Site state: ${diagnostics.siteState ?? "—"}`);
     if (diagnostics.lastError) lines.push(`Last error: ${diagnostics.lastError}`);
@@ -951,11 +1014,9 @@ export class Overlay {
     this.cancelTabResize();
     this.endRangePointer();
     this.cancelListen();
-    for (const dispose of [...this.mappingDisposers.splice(0), ...this.hotkeyDisposers.splice(0), ...this.disposers.splice(0)]) {
+    for (const dispose of [...this.tapKeyDisposers.splice(0), ...this.hotkeyDisposers.splice(0), ...this.disposers.splice(0)]) {
       try { dispose(); } catch { /* already gone */ }
     }
     this.keyboard.dispose(); this.debug.dispose(); this.root.remove();
   }
 }
-
-export { MAX_KEY_COUNT };

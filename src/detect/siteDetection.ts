@@ -1,140 +1,89 @@
 import {
-  ASHTONK_APP_GLOBAL,
-  ASHTONK_HOST_PATTERN,
-  ASHTONK_HOSTS,
   DEV_HOST_PATTERN,
+  KNOWN_APEXES,
   KNOWN_HOSTS,
+  SITE_NAME,
 } from "../constants";
-import { readAshtonkApi } from "./ashtonkAdapter";
 
 export type SiteVerdict = "confirmed" | "probable" | "unknown";
-export type SiteFamily = "webosumania" | "ashtonkmania" | "unknown";
 
 export interface SiteCheck {
   verdict: SiteVerdict;
   host: string;
   message: string;
-  /** Which site adapter should own this page. Omitted by older callers. */
-  family?: SiteFamily;
 }
 
-/** Recognise the known Ashtonk!mania deployments and versioned previews. */
-export function isAshtonkHost(host: string): boolean {
+export const NOT_DETECTED_MESSAGE = `${SITE_NAME} not detected.`;
+
+/** True for a known webosu! deployment host. */
+export function isKnownHost(host: string): boolean {
   const h = host.toLowerCase();
-  return (
-    ASHTONK_HOSTS.includes(h) ||
-    ASHTONK_HOST_PATTERN.test(h) ||
-    h.endsWith(".ashtonkmania.lokaux.workers.dev")
-  );
+  if (KNOWN_HOSTS.includes(h)) return true;
+  return KNOWN_APEXES.some((apex) => h.endsWith(`.${apex}`));
 }
 
 /**
- * Determine whether the current page is one of the supported mania sites.
+ * Determine whether the current page is webosu!.
  *
  * Three tiers, cheapest first:
- *  1. Hostname match or exported site global       -> confirmed
- *  2. Localhost dev server                        -> probable
- *  3. DOM fingerprint (canvas + site wording)     -> probable
+ *   1. Hostname match (or a subdomain of a known apex)  -> confirmed
+ *   2. Localhost dev server                             -> probable
+ *   3. DOM/global fingerprint (Pixi canvas + the site's globals) -> probable
  *
- * The DOM fingerprint exists because Web osu!mania has changed hosts twice
- * already; a future move should not silently disable the tool. Ashtonk!mania
- * additionally exports `window.AshtonkMania`, which works for the saved
- * single-file HTML build as well as hosted deployments.
+ * The fingerprint exists because webosu! has been mirrored on several hosts
+ * already; a mirror should not silently disable the tool. It is deliberately
+ * structural — the site's own `game`/`playback` globals plus a canvas — rather
+ * than matching class names that a restyle would churn.
  */
 export function detectSite(win: Window = window): SiteCheck {
-  const host = win.location.hostname.toLowerCase();
-  const ashtonkApi = readAshtonkApi(win);
+  const host = (win.location?.hostname ?? "").toLowerCase();
+  const anyWin = win as unknown as Record<string, unknown>;
 
-  if (isAshtonkHost(host) || ashtonkApi) {
-    return {
-      verdict: "confirmed",
-      host,
-      family: "ashtonkmania",
-      message: `Ashtonk!mania (${host})`,
-    };
-  }
-
-  if (KNOWN_HOSTS.some((known) => host === known)) {
-    return {
-      verdict: "confirmed",
-      host,
-      family: "webosumania",
-      message: `Web osu!mania (${host})`,
-    };
-  }
-
-  // Subdomain of a known apex domain (e.g. a preview deployment).
-  const apexMatch = KNOWN_HOSTS.some(
-    (known) => host.endsWith(`.${known}`) && host !== known,
-  );
-  if (apexMatch) {
-    return {
-      verdict: "confirmed",
-      host,
-      family: "webosumania",
-      message: `Web osu!mania (${host})`,
-    };
+  if (isKnownHost(host)) {
+    return { verdict: "confirmed", host, message: `${SITE_NAME} (${host})` };
   }
 
   if (DEV_HOST_PATTERN.test(host)) {
     return {
       verdict: "probable",
       host,
-      family: "webosumania",
-      message: `Local dev server (${host}) — assuming Web osu!mania`,
+      message: `Local dev server (${host}) — assuming ${SITE_NAME}`,
     };
   }
 
-  const ashtonkFingerprint = /ashtonk/i.test(win.document.title ?? "");
-  if (matchesDomFingerprint(win.document)) {
+  if (anyWin.game && anyWin.playback) {
     return {
       verdict: "probable",
       host,
-      family: ashtonkFingerprint ? "ashtonkmania" : "webosumania",
-      message: ashtonkFingerprint
-        ? `Unrecognised host (${host}) but the page looks like Ashtonk!mania`
-        : `Unrecognised host (${host}) but the page looks like Web osu!mania`,
+      message: `Unrecognised host (${host}) but the page exposes ${SITE_NAME}'s game objects`,
     };
   }
 
-  return {
-    verdict: "unknown",
-    host,
-    family: "unknown",
-    message: NOT_DETECTED_MESSAGE,
-  };
+  if (matchesDomFingerprint(win)) {
+    return {
+      verdict: "probable",
+      host,
+      message: `Unrecognised host (${host}) but the page looks like ${SITE_NAME}`,
+    };
+  }
+
+  return { verdict: "unknown", host, message: NOT_DETECTED_MESSAGE };
 }
 
-/**
- * Structural fingerprint of either supported site. Deliberately tolerant: it
- * looks for a canvas plus wording unique to these projects, not for class names
- * that a refactor would churn.
- */
-function matchesDomFingerprint(doc: Document): boolean {
+/** Structural fingerprint: a Pixi canvas plus the site's own branding. */
+function matchesDomFingerprint(win: Window): boolean {
+  const doc = win.document;
+  if (!doc?.querySelector) return false;
+
   const canvas = doc.querySelector("canvas");
-  if (!canvas) return false;
+  const text = `${doc.title ?? ""} ${(doc.body as HTMLElement | null)?.innerText?.slice(0, 4000) ?? ""}`.toLowerCase();
+  const mentions = text.includes("webosu") || text.includes("osu!");
 
-  const view = doc.defaultView as (Window & Record<string, unknown>) | null;
-  const isWebgl =
-    canvas.getAttribute("data-pixi") !== null ||
-    // Pixi v8 canvases are created via a WebGL context; the site's devtools
-    // hook / Ashtonk's exported app are cheap proxies for that.
-    view?.__PIXI_APP__ != null ||
-    view?.[ASHTONK_APP_GLOBAL] != null;
+  // The site's skin loader sets `window.Skin` to a texture table and its
+  // bootstrap publishes `window.Playback`; either is a cheap proxy for
+  // "this page is running webosu!".
+  const anyWin = win as unknown as Record<string, unknown>;
+  const siteGlobals = typeof anyWin.Playback === "function" || !!anyWin.Skin;
 
-  const text = (doc.title + " " + (doc.body?.innerText?.slice(0, 4000) ?? ""))
-    .toLowerCase();
-  const mentionsGame =
-    text.includes("osu!mania") ||
-    text.includes("web osu") ||
-    text.includes("ashtonk") ||
-    text.includes("beatmap");
-
-  return isWebgl || mentionsGame;
+  return !!canvas && (mentions || siteGlobals);
 }
-
-/**
- * The exact copy the spec requires when the page is not a supported site.
- * Kept as a constant so it can never drift from the requirement.
- */
-export const NOT_DETECTED_MESSAGE = "Web osu!mania not detected.";

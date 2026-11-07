@@ -1,356 +1,275 @@
-# Keyfall architecture
+# Architecture
+
+Kismet is one engine in nine small pieces. Each piece has a single
+responsibility, a plain data contract, and tests that can be read on their own.
 
 ```
-                    ┌──────────────────────────────────────────┐
-                    │              src/main.ts                 │
-                    │  bootstrap · console API · wiring        │
-                    └───────────────┬──────────────────────────┘
-                                    │
-        ┌───────────────────────────┼───────────────────────────┐
-        │                           │                           │
-┌───────▼────────┐         ┌────────▼────────┐         ┌────────▼────────┐
-│  core/settings │         │  engine/engine  │         │  ui/overlay     │
-│  persistence   │◄────────┤  state machine  ├────────►│  keyboard       │
-│  validation    │         │  orchestration  │  events │  debug          │
-└────────────────┘         └───┬────┬────┬───┘         └─────────────────┘
-                               │    │    │
-                 ┌─────────────┘    │    └──────────────┐
-                 │                  │                   │
-        ┌────────▼───────┐  ┌───────▼────────┐  ┌───────▼────────┐
-        │    detect/     │  │    timing/     │  │    input/      │
-        │ siteDetection  │  │ clock          │  │ InputManager   │
-        │ pixiHook       │  │ scheduler      │  └───────┬────────┘
-        │ fiber          │  └───────▲────────┘          │
-        │ ashtonkAdapter │          │                   │
-        │ buildContext   │  ┌───────┴────────┐          │
-        │ chartSource    │  │  chart/        │          │
-        │ osuFileParser  │  │  timeline      │          │
-        └────────┬───────┘  └────────────────┘          │
-                 │                                      │
-                 └──────────────────────────────────────┘
-                                │
-                    ┌───────────▼────────────┐
-                    │  document.dispatchEvent │
-                    │  KeyboardEvent(code)    │
-                    └───────────┬────────────┘
-                                │
-                    ┌───────────▼────────────┐
-                    │  the site's own input   │
-                    │   system → scoring      │
-                    └────────────────────────┘
+                   ┌──────────────────────────────────────────────┐
+                   │                  engine.ts                   │
+                   │  state machine, polling, stats, public API   │
+                   └──┬───────┬────────┬────────┬────────┬────────┘
+                      │       │        │        │        │
+       siteDetection  │  chart.ts  timeline.ts  clock.ts  scheduler.ts
+       playbackSource │       │        │        │        │
+                      │       │        │        │        │
+                   Pointer.ts  humanizer.ts  guards.ts  stats.ts
+                      │
+                  the page's window listeners
 ```
 
-Data flow for one beatmap:
+Everything is plain TypeScript with no runtime dependencies. The bundle is a
+single IIFE; there is no framework, no reactivity, no virtual DOM.
+
+---
+
+## Constants and types
+
+`src/constants.ts` holds the site's identity (hosts, globals), the playfield
+geometry (512×384), the storage key, and every tunable default and clamp.
+`src/types.ts` holds the shared interfaces: `Chart`, `ChartObject`,
+`TimelineAction`, `Settings`, `TapKeys`, and read-only descriptions of the
+site's own objects.
+
+Both are dependency-free so any module can import them.
+
+---
+
+## Detection
+
+### `detect/siteDetection.ts`
+
+Answers one question: *is this webosu!?*
+
+- **confirmed** — the hostname is a known deployment
+  (`webosu-online.netlify.app`, `webosu.online` and subdomains).
+- **probable** — a localhost dev server, or a page that exposes
+  `window.game` + `window.playback`, or a page whose DOM mentions webosu!/osu!.
+- **unknown** — none of the above; Kismet stays idle and keeps a slow poll.
+
+It deliberately does not look at CSS class names or element ids: the site has
+been restyled before, and a re-skin must never disable the tool.
+
+### `detect/playbackSource.ts`
+
+Finds the live play and returns `{ playback, game, gfx, via, tapKeys }`:
+
+1. `window.playback` / `window.game` — the documented path, and the only one
+   that matters for the deployed site.
+2. `window.game.scene` as a fallback if the `playback` global has not been
+   refreshed yet.
+3. The tap keys are read from `game.K1keycode` / `K2keycode`, validated as
+   plausible key codes, and classified as `source: "site"`; if they are missing
+   or nonsense, Kismet falls back to Z/X and says so in the panel.
+
+`playbackBlocker()` is the fair-play gate: if `game.autoplay` is on, the play is
+reported as blocked with a human-readable reason, and the engine will not start.
+
+---
+
+## Chart
+
+### `chart/chart.ts`
+
+`buildChart(playback)` mirrors `hits[]` into Kismet's own `Chart`:
+
+- one `ChartObject` per hit, in song order, with `index` fixed at creation;
+- `circles`, `sliders`, `spinners` counts and `noteCount`;
+- slider paths sampled from `curve.pointAt` **once**, then unrolled for every
+  repeat (forward, backward, forward…) into a flat point list, so following a
+  slider is a table lookup rather than a call into the site's renderer;
+- judgement windows taken from `GreatTime/GoodTime/MehTime`, or derived from OD;
+- a `signature` (a short hash of the object list and metadata) so the engine can
+  tell "same chart" from "different chart" without comparing thousands of rows.
+
+`sliderPointAt(object, elapsed)` interpolates the unrolled path, clamping at the
+tail. `analyseChart(chart)` produces the summary the panel shows and the
+humanizer uses: circles, sliders, spinners, longest stream, peak/average NPS,
+minimum gap, longest slider, largest jump.
+
+### `chart/timeline.ts`
+
+`buildTimeline(chart, options)` turns chart objects into a flat, ordered list of
+`{ type: "down" | "up", time, objectIndex, x, y }` actions:
+
+- circles: `down` at `time`, `up` at `time + tapHold` (default ~12 ms);
+- sliders: `down` at the head, `up` at `endTime`;
+- spinners: `down` at the start, `up` at the end;
+- a humanizer can shift each press and stretch each hold;
+- **every release is clamped to stay strictly before the next press**, so a
+  humanized hold can never swallow the following note;
+- an offset is applied once, at build time.
+
+`activeObjectAt(objects, chartTime)` answers "what is under the cursor right
+now?" for the slider/spinner follower.
+
+---
+
+## Humanization
+
+`src/humanize/humanizer.ts` is optional and **off by default**.
+
+It produces a deterministic, seeded delta per object from a mixture of a smooth
+random field (so timing drifts like a player, not like noise) and per-object
+jitter, scaled by strength and clamped to a window derived from the judgement
+windows. `patternAware` tightens the variation inside streams and around
+chords, and `holdReleaseVariation` extends or shortens slider releases — always
+within the gap to the next object.
+
+`stats` reports mean, standard deviation, mean absolute deviation, clamped
+count and isolation count, which is what the panel and `diagnostics()` show.
+
+Because it is seeded and chart-derived, the same chart with the same seed plays
+back identically — useful when comparing settings.
+
+---
+
+## Timing
+
+### `timing/clock.ts`
+
+`ClockMapper` fits `songTime = slope * hostTime + intercept` from samples of
+`(performance.now(), playback.osu.audio.getPosition() * 1000 + offset)`.
+
+- Samples are added at most every few milliseconds and the fit uses a robust
+  average, so a stalled audio element does not poison it.
+- `error` is the current residual: how far the fit is from the live audio
+  position. Large residuals mean the audio seeked or stalled.
+- `hardReset()` throws the fit away after a pause, a seek or an emergency stop.
+- The mapper also converts in both directions: `toSong(hostMs)` and
+  `toHost(songMs)`.
+
+### `timing/scheduler.ts`
+
+The scheduler owns the action cursor:
+
+- `load(actions, songNow)` positions the cursor and keeps the list sorted;
+- each frame it fires everything due, up to a catch-up cap;
+- it arms a `FastTask` (a `MessageChannel` message — the fastest cross-task
+  scheduling available in a page) for the next deadline, so a press does not
+  have to wait for the next animation frame;
+- inside the last `spinThreshold` milliseconds it spins with `performance.now()`
+  until the deadline is reached, then dispatches — this is what turns
+  frame-quantised timing (±8 ms) into sub-millisecond timing;
+- jitter, fired, dropped and armed counts are exposed for diagnostics.
+
+The scheduler never decides *what* to do — `Pointer` executes actions — so it is
+testable with a fake clock and a recording sink.
+
+---
+
+## Input
+
+`src/input/Pointer.ts` is the only module that touches the page's input path.
+
+- `moveTo(x, y)` converts playfield pixels to client coordinates using **the
+  site's live `gfx`** and dispatches `mousemove` on `window`.
+- `press()` dispatches `keydown` with the configured key code; `release()`
+  dispatches `keyup`. Both are non-repeating and carry the fields the site
+  reads.
+- `press()` refuses to double-press (`suppressed`), `release()` always sends a
+  `keyup` if Kismet believes the key is down, and `releaseAll()` is idempotent.
+- After each move it reads back `game.mouseX/mouseY` to measure `maxMoveError`,
+  which catches a wrong `gfx` mapping immediately instead of as mystery misses.
+- `setKeyCode()` follows a mid-play rebind of the site's tap key.
+
+There is no `InputManager` and no per-note key mapping: osu!standard has two tap
+keys, and the site owns both.
+
+---
+
+## Safety
+
+`src/engine/guards.ts` installs `blur`, `visibilitychange`, `pagehide` and
+`beforeunload` listeners plus a watchdog interval:
+
+- blur / hide → release, interrupt the run;
+- pagehide / unload → release, no state change;
+- a hold longer than `STUCK_KEY_TIMEOUT` (20 s) → release + panic;
+- three consecutive failed liveness probes (`window.app.view`, `game`,
+  `playback`) → release + panic.
+
+`verifyInputState()` compares the site's `K1down/K2down` against Kismet's belief
+and reports a disagreement, which is how a swallowed `keyup` is caught early.
+
+---
+
+## The engine
+
+`src/engine/engine.ts` is the state machine:
 
 ```
-Site adapter → GameLike → ParsedChart ─┐
-                             ├→ Humanizer.prepare()   (optional; per-note deltas
-ChartAnalysis ◄──────────────┘                          and release ceilings)
-                             │
-                             ▼
-                    Timeline (InputAction[])
-                             │
-                             ▼
-                        Scheduler ────► live judgement-clock slope / ClockMapper fallback
-                             │
-                             ▼
-                       InputManager
-                             │
-                             ▼
-                 document KeyboardEvents
-                             │
-                             ▼
-            site's input system (document / window capture)
-                             │
-                             ▼
-            site's ScoreSystem → stats readback
+IDLE ──▶ DETECTING ──▶ READY ⇄ RUNNING ⇄ PAUSED ──▶ STOPPING ──▶ READY
+                            └──────────▶ ERROR (blocked / failed)
 ```
 
-Humanization sits between the parsed chart and the timeline rather than between
-the timeline and the scheduler. See
-[Humanization](#humanization-why-it-is-baked-into-the-timeline) below.
+- `init()` checks the site, installs guards and starts a 500 ms detection poll.
+- `tryDetect()` re-reads the play, rebuilds the chart when the signature
+  changes, and is cheap when nothing changed.
+- `start()` builds the timeline, loads the scheduler and primes the clock; if
+  the song has not started it arms a pending start instead.
+- While running it drives a `requestAnimationFrame` loop that samples the clock,
+  fires due actions, keeps the cursor on sliders and spinners, and updates
+  stats.
+- The site's own pause/exit is mirrored: paused → release and `PAUSED`; ended or
+  scene gone → `READY` with the chart forgotten.
+- `stop()` and `emergencyStop()` both release everything; the latter also clears
+  the queue and the clock fit.
 
-## Module responsibilities
+Events (`phase`, `site`, `detected`, `timeline`, `lost`, `stats`, `cursorState`,
+`pendingStart`, `log`) are how `main.ts` drives the panel without the engine
+knowing it exists.
 
-| Module | Owns | Deliberately does *not* do |
-|---|---|---|
-| `detect/siteDetection` | "which supported site is this?" | Anything about gameplay |
-| `detect/pixiHook` | Site-specific ordered acquisition strategies | Interpreting the game it finds |
-| `detect/fiber` | WOM React fiber traversal, shape-based `Game` recognition | Any name-based coupling |
-| `detect/ashtonkAdapter` | `window.AshtonkMania` + `GameplayScreen.s` → `GameLike` | Scheduling, input, score submission, or enabling `AT` |
-| `detect/buildContext` | `GameLike` → `ParsedChart` + `KeyMapping` | Scheduling or input |
-| `detect/osuFileParser` | `.osu` text → chart (fallback) | Reading the live game |
-| `detect/chartSource` | Read-only `.osz` observation + minimal ZIP reader | Modifying any request |
-| `chart/timeline` | Chart → ordered `InputAction[]`, pattern analysis | Timing or input |
-| `humanize/humanizer` | Reproducible per-note timing deltas and release ceilings | Knowing what a key is |
-| `util/rng` | Seeded PRNG, uniform and normal sampling | Any policy decision |
-| `timing/clock` | `performance.now()` ↔ chart-time linear model | Deciding what to fire |
-| `timing/scheduler` | Look-ahead arming, catch-up, batching, cursor | Knowing what a note is |
-| `input/InputManager` | Synthetic key events, held-state tracking | Deciding *when* |
-| `engine/guards` | Stuck-key, liveness, lifecycle safety | Gameplay logic |
-| `engine/stats` | Reading the site's own score/combo/accuracy | Recomputing accuracy |
-| `engine/engine` | Phase machine, wiring, teardown | Any of the above directly |
-| `ui/*` | Overlay, keyboard view, debug panel | Touching the engine's internals |
-| `core/settings` | Persistence, validation, clamping | Knowing what settings mean |
+`engine/stats.ts` reads the site's own score overlay (`judgecnt`, `combo`,
+`judgeTotal`, `maxJudgeTotal`) and combines it with the timeline to report
+objects played, remaining, taps, accuracy and elapsed time.
 
-The rule throughout: **each layer only sees the shared contracts of the layer
-below it.** Downstream code uses `GameLike` rather than the site's native
-objects, which makes detection strategies independently replaceable.
+---
 
-### Why a second site needs only an adapter
+## UI
 
-Ashtonk!mania has no Pixi/React `Game`, stores notes as `{ col, time, end,
-isLN }`, installs input listeners on `window` capture, and judges against an
-AudioContext-derived `inputTime`. `src/detect/ashtonkAdapter.ts` projects the
-live session onto the same `GameLike` contract the engine already reads:
-`hitObjects`, `timeElapsed`, `state`, `columnKeybinds`, `scoreSystem`,
-`chartRevision`, `chartSignature` and `unsupportedReason`, plus an optional
-`chartTimeAtHost` judgement-clock predictor. A cheap revision catches session,
-engine and note-array replacements on the firing path; the 100ms monitor also
-checks the full layout fingerprint for in-place edits. Generic adapters without
-a revision retain their previous chart-rebuild behavior.
+The panel is unchanged from earlier versions and is deliberately isolated:
 
-There is still exactly one timeline, one `ClockMapper`, one `Scheduler`, one
-`InputManager`, one humanizer and one overlay. The adapter never calls the
-site's Auto (`AT`), replay feed, private judgement engine, or score submission.
-Replay, spectate and built-in Auto feeds are refused because the game ignores
-keyboard input during those feeds. Normal gameplay can trigger the game's own
-score-submission flow; see [`ASHTONK-CONTRACT.md`](./ASHTONK-CONTRACT.md).
+- `ui/overlay.ts` — the panel, tabs, sliders, notice bar, debug log; it receives
+  charts, analysis, tap keys, stats and holding state through setters.
+- `ui/dom.ts` — a tiny `el()`/`listen()` helper, so the panel needs no
+  framework.
+- `ui/styles.ts` — the CSS, the inlined font faces and the accent variables.
+- `ui/keyboard.ts` — the tap-key visualiser (two large keys, pressed state).
+- `ui/motion.ts` — the spring/exit/press curves and reduced-motion fallbacks.
+- `ui/debug.ts` — the structured `[DEBUG]` snapshot.
 
-## Design decisions worth knowing
+`hotkeys.ts` owns action hotkeys (defaults G/B/V/P plus Right Shift for the
+panel). It listens in the capture phase so it still sees keys whose propagation
+the site stops, filters `isTrusted`, `repeat`, modifiers and typing targets, and
+reports collisions with the site's tap keys rather than silently double-binding
+them.
 
-### Why `performance.now()` needs a model, not a constant
+---
 
-The site judges input against `game.timeElapsed = Math.round(song.seek() * 1000)`.
-That clock:
+## Entry point
 
-- quantises to whole milliseconds,
-- only advances when a frame renders,
-- has a slope equal to the playback-rate mod,
-- jumps discontinuously on seek, pause, retry and restart,
-- already includes the site's `audioOffset` and `outputLatency` corrections.
+`src/main.ts` wires it together: settings → engine → overlay → hotkeys, mirrors
+engine events into the panel, exposes `window.Kismet`
+(`start`, `pause`, `resume`, `stop`, `emergencyStop`, `diagnostics`, `stats`,
+`settings`, `phase`, `chart`, `tapKeys`, `overlayElement`, `uiVisible`,
+`uninstall`), and guards against double injection with `__kismetInstalled__`.
 
-So `timing/clock.ts` fits `chart = slope × host + intercept` over a sliding
-24-sample window by least squares, reports its own residual, and declares
-`confident` only once it has enough samples and a tight fit. `hostAt(target)`
-inverts the model, and that prediction is what timers are armed against.
+Nothing in `main.ts` is required by the tests: the engine and every module below
+it can be driven headlessly under a fake DOM, which is how `test/engine.test.ts`
+and `scripts/smoke.mjs` work.
 
-For Ashtonk!mania, the adapter additionally exposes the site's judgement clock
-at an arbitrary host timestamp. The engine estimates its current slope from two
-samples; the scheduler revises an armed deadline as speed changes and rechecks
-before firing. The least-squares `ClockMapper` remains the fallback for sites
-without that capability. Rate changes are not part of chart identity.
+---
 
-Discontinuity detection is the subtle part. A **backward** chart jump is always
-a seek. A **forward** jump is ambiguous: a frame stall recovering also produces
-a large forward jump, but proportionally to elapsed host time, and those notes
-are genuinely due. Only a *disproportionate* forward jump is a seek:
+## Build
 
-```ts
-const plausibleChartAdvance = Math.max(dHost * SEEK_RATIO_LIMIT, dHost + SEEK_ABSOLUTE_FLOOR);
-if (dChart > plausibleChartAdvance) discontinuity = true;
-```
+`scripts/build.mjs` uses esbuild to produce:
 
-An earlier version used `dChart > dHost * 8 + 250`, which misclassified a
-400ms stall as a seek and skipped real notes. There is a regression test.
+| File | What it is |
+| --- | --- |
+| `dist/kismet.js` | the IIFE bundle, for the console or a bookmarklet |
+| `dist/kismet.user.js` | the same code plus a userscript header and `@match` list |
+| `dist/bookmarklet.txt` | the bundle as a `javascript:` URL |
+| `dist/bookmarklet-loader.txt` | a tiny loader for a hosted `kismet.js` |
 
-### Why one rAF loop and not one timer per note
-
-The scheduler keeps a single `requestAnimationFrame` heartbeat and at most one
-armed scheduler timer. Frames sample the clock, handle seeks, recover due actions
-and retarget accelerated deadlines. The timer is primed at start/resume, chains
-to the next batch without waiting for a frame, and rechecks its prediction at
-most a lookahead interval apart over long gaps. Thus slow rendering alone need
-not delay input when browser tasks and the game's judgement clock still run.
-
-After a blocked-thread spike, the first timer or frame to wake uses the current
-clock. If more than `MAX_CATCHUP_ACTIONS_PER_FRAME` are overdue, the scheduler
-skips only the oldest overdue timestamp batches (never future actions) and
-reports the skipped actions. Input reconciliation releases held keys whose tails
-were skipped without releasing holds whose tails remain ahead. A detected seek
-likewise reconciles held keys before rebasing the cursor. No JavaScript can send
-events while the main thread is blocked: expired judgement windows may be
-missed, and the game may fail before recovery.
-
-Near a deadline the timer fires `spinThreshold` ms early, then busy-waits the
-remainder against an absolute deadline. Two independent budgets guard the
-spin: the deadline and a hard iteration cap.
-
-An earlier version computed the spin as `while (now() < now() + remaining)`.
-That reads as bounded but is not: if the clock does not advance (a frozen or
-stubbed `performance.now`), neither side of the comparison moves and the loop
-never exits. The comparison must be against an absolute target captured once.
-There is a regression test.
-
-### Why the timing offset lives in the scheduler
-
-The offset has to shift when an action is *due*. There are two paths that
-decide that — the armed-timer path and the catch-up path — and they must agree.
-An earlier version applied the offset only inside `hostTimeForChart`, which
-affects the armed path alone; any note fired by catch-up ignored the offset
-entirely. `Scheduler.setActionOffset` now owns it and applies it uniformly via
-`dueTime(index)`, and changing it rebases the cursor.
-
-### Why action ordering matches the site exactly
-
-`ReplayPlayer` builds `[column, time, isDown]` tuples and sorts by time alone,
-relying on a stable sort to preserve construction order (press then release, per
-hit object). `chart/timeline.ts` reproduces that: construction order then a
-stable sort on time, with **no** type tiebreaker.
-
-Adding `up < down` at equal times looks like an improvement and is not — it
-would diverge from the site's own replay semantics. The ordering that actually
-matters falls out of construction order for free: a hold ending at the same
-instant the next note on that column begins emits its release first, so the
-press is not swallowed by the site's `if (this.pressedColumns[column]) return`.
-
-### Why hold heads are dropped in a pre-pass
-
-The site stores each hold as two objects. The head tap can sort either before or
-after the hold depending on the comparator, so a "compare with the previous
-note" check is order-dependent and silently breaks. Pass 1 collects every hold's
-`time:column:endTime` into a `Set`; pass 2 skips any tap that matches. Order
-independent, and it also honours an explicit `isHoldHead` flag when present.
-
-### Why a tap's release is deferred
-
-The site's own autoplay emits a tap's press and release at the same timestamp.
-Dispatching both in one synchronous batch is faithful but leaves zero key-down
-time. `InputManager` defers the release by `minTapHoldMs` (12ms default) — far
-inside the tightest judgement window (~±22ms), and closer to how a physical key
-behaves.
-
-That creates a trap: a **jack faster than the deferral** would find the column
-still held and drop the press, and the site would drop it too because its own
-`pressedColumns` is still `true`. So `keyDown`, on finding a pending deferred
-release, cancels it, emits the release immediately, then presses — reproducing
-what a physical key does. Counted as `flushedEarlyRelease` in diagnostics.
-Regression tested.
-
-### Why the state monitor is not on the firing path
-
-If a play fails between notes, nothing fires, so a check inside the fire
-callback would never run — with a hold still pinned. `checkSiteState()` runs on
-its own 100ms timer and covers `RUNNING`, `PAUSED` and `READY` (a play can fail
-after the last action, while the site transitions to its results screen).
-
-### Why stats are read, not computed
-
-`game.scoreSystem` already exposes `score`, `combo`, `accuracy` and per-judgement
-counts as plain numbers. Reading them is a few property accesses and is exactly
-what the results screen will show. Re-deriving accuracy would risk disagreeing
-with the site.
-
-### Why the UI writes through `setText` / `setDataset`
-
-The readout updates several times a second. Assigning `textContent`
-unconditionally forces work every time even when nothing changed; both helpers
-no-op on an unchanged value, so DOM writes are proportional to actual change.
-The debug panel buffers and flushes on an interval instead of appending per
-event, and when debug mode is off it allocates nothing at all.
-
-### UI motion without a second frame loop
-
-`ui/motion.ts` centralizes spring-inspired Bézier curves and timings. CSS handles
-interruptible panel, drawer and control transitions; it does not touch the
-scheduler. The sliders retain native range inputs for keyboard and accessibility
-semantics. A decorative thumb follows the same setting, easing clicks and resets
-but switching off positional transitions during pointer drags; window dragging
-and resizing also stay direct. Mirrored settings still update immediately.
-
-Only the height change between already-open tabs uses the Web Animations API. It
-samples unscaled layout heights, cancels and restarts from the current height on
-rapid tab changes, and cancels when the drawer or panel closes or the UI is
-uninstalled. `prefers-reduced-motion` disables new motion and finishes/cancels
-in-flight animations when the preference changes. ARIA and inert state are
-updated immediately, not at the end of an animation. There is no animation
-polling or per-frame JavaScript loop.
-
-### Humanization: why it is baked into the timeline
-
-It would be simpler to perturb each action at fire time. That does not work, for
-two reasons that are both about *ordering* rather than timing:
-
-- A chord is several notes at one timestamp. Perturbing each action
-  independently spreads them apart, turning a chord into a rapid arpeggio. The
-  delta has to be computed per *timestamp* and shared.
-- The timeline's sort is what guarantees a hold ending exactly where the next
-  note on that column begins releases before pressing. Perturbing after the sort
-  cannot preserve that.
-
-So deltas are applied before the sort, and `chart/timeline.ts` runs three passes:
-collect hold keys, select the playable notes, emit actions.
-
-The selection pass matters more than it looks. The humanizer must see exactly the
-notes that will be played, in order, and nothing else — a dropped hold head would
-otherwise consume a drift sample and shift everything after it.
-
-**Two passes inside the humanizer, too.** A hold's release has to be clamped
-against the *next* press on that column, and that press's shifted time is not
-known until every note delta exists. A single streaming pass cannot do this: it
-would clamp against a ceiling that has not been computed yet, and a late release
-would swallow the next note — the site's `hit()` early-returns while the column is
-down, so the press is dropped and the key stays pinned. `prepare()` therefore
-computes every delta and every release ceiling up front, and reading an edge
-afterwards is a pure lookup. That also makes the result independent of call
-ordering.
-
-**Determinism has one non-obvious failure mode.** The Gaussian sampler caches one
-value per pair (Marsaglia polar). Rewinding only the PRNG state on `reseed()`
-left that spare behind, so consecutive runs *alternated* between two sequences
-instead of repeating one. It surfaced as fatigue-dependent non-reproducibility,
-because fatigue happens to draw an odd number of samples for many chart lengths.
-`reseed()` clears the spare; there is a regression test that sweeps both
-parities.
-
-**Drift is bounded, not just mean-reverting.** An Ornstein–Uhlenbeck process
-returns to zero in expectation, which is not a guarantee on any finite run. Both
-drift processes get a hard clamp, because "the wobble cannot become an accidental
-offset" is a property worth enforcing rather than assuming — that is what the
-Timing Offset control is for.
-
-**Pattern awareness tightens intervals, not just variance.** Reducing the sd
-inside a jack is not enough: what a player keeps consistent in a repeated pattern
-is the *interval* between hits, not the absolute offset. So a jack blends toward
-the previous note's delta at `patternAware` weight. At full pattern awareness a
-perfect jack keeps its spacing almost exactly while the run as a whole still
-wanders.
-
-**Chords are not a pattern.** Classification looks backwards at one note's own
-column, so it cannot see a group property. `chord` was removed from the pattern
-enum: chords are handled by delta sharing and counted separately as
-`chordMembers`. An earlier version tried to reclassify a chord's first member
-retrospectively, which made the counts depend on arrival order.
-
-## Testing
-
-Tests use `node --test` without a test framework, plus a smoke test that runs the
-shipped bundle. The Ashtonk!mania tests include an end-to-end run through the DOM
-stub's `document -> window` capture path and an optional offline Chromium test
-against the real game.
-
-Node strips TypeScript types natively (≥22.18) but still requires fully
-specified ESM paths, while the source uses extensionless imports (correct for a
-bundler and for `tsc`). `test/helpers/tsLoader.mjs` is a resolve hook that adds
-the missing `.ts`; nothing is transformed.
-
-`test/helpers/domStub.ts` is a hand-rolled minimal DOM plus a **manual clock**.
-Nothing runs until `advance()` is called, so every timing assertion is exact
-rather than flaky.
-
-Coverage: `.osu` parsing (1K–18K, holds, mirror, holdOff, delay, audio offset,
-playback rate, malformed input, rejection cases), timeline ordering and
-deduplication, clock fitting and discontinuity classification, scheduler
-ordering/batching/catch-up/seek/pause/stop, input dispatch including the jack
-regression, settings validation and persistence, seeded RNG distributions,
-humanization determinism and its ordering invariants, and end-to-end tests that
-drive a stubbed site through the real engine — including "no stuck keys" on stop,
-emergency stop, dispose, play failure and game disappearance, and humanized
-playback across five seeds with holds, release variation, fatigue and drift all
-at maximum.
-
-The humanization tests are written to fail on the silent breakages rather than the
-audible ones. "Every press was released" and "presses and releases alternate per
-column" are asserted across seeds; "the timing sounds human" is not asserted at
-all, because nothing can check that and a test that pretends to would only hide a
-regression.
+CSS, the fallback font (Comfortaa, OFL) and the artwork are inlined at build
+time, so a distributed script is self-contained.

@@ -1,245 +1,81 @@
-# Maintaining Keyfall when the site changes
+# Updating when the site changes
 
-Both supported sites are actively developed. This is the triage order. Use
-`Keyfall.diagnostics().siteFamily` to see whether the WOM or Ashtonk!mania
-adapter is active.
+Kismet depends on a small, deliberate surface of webosu!. When the site changes,
+the work should be a handful of edits in known places. This file is the map.
 
-## Step 1: work out which layer broke
-
-Open devtools on a supported host (`webosumania.com` or
-`v2-ashtonkmania.lokaux.workers.dev`), start a map, and run:
+## First: check whether it is really broken
 
 ```js
-Keyfall.diagnostics()
+Kismet.diagnostics()
 ```
 
-Read it top-down:
+| What you see | Where to look |
+| --- | --- |
+| `site.verdict: "unknown"` | `detect/siteDetection.ts` — the hostname changed, or the site is served from a new domain |
+| `site.verdict: "probable"`, `chart: null` | `detect/playbackSource.ts` — the globals moved |
+| `chart.objects` smaller than expected | `chart/chart.ts` — the `hits[]` shape changed |
+| `blocker` non-null | `playbackSource.ts`'s `playbackBlocker`, or the site really is autoplaying |
+| Chart fine, clicks miss | `input/Pointer.ts` (client mapping) or `timing/clock.ts` (song time) |
+| Clicks land, nothing scores | The site no longer judges from `game.mouseX/mouseY` + `K1down`, or it now checks `isTrusted` |
+| `input.maxMoveError` large | `window.gfx` semantics changed (`xoffset`/`yoffset`/`width`/`height`) |
+| `clock.errorMs` large | `playback.osu.audio.getPosition()` changed units or the offset is applied twice |
 
-```js
-{
-  site: "confirmed",     // ← wrong?  detect/siteDetection.ts
-  siteFamily: "webosumania" | "ashtonkmania",
-  via: "pixiGlobal" | "ashtonkGlobal" | "canvasScan" | "fiberProbe" | null,  // ← null? detect/pixiHook.ts
-  chart: { keyCount, notes, actions, signature },  // ← null?  detect/buildContext.ts
-  mapping: { source, codes },   // ← source "fallback"?  keybinds moved
-  clock: { slope, errorMs, confident },  // ← not confident?  timing/clock.ts
-  scheduler: { cursor, armed, fired, dropped },
-  input: { held, down, up, duplicatesSuppressed, failures },
-  siteState: "PLAY",
-  lastError: null
-}
-```
+## The four files that encode the contract
 
-Each field points at one module. `lastError` usually states the problem
-directly.
+1. **`src/constants.ts`** — hosts, globals, playfield size. A new deployment is
+   one array entry.
+2. **`src/detect/playbackSource.ts`** — how to find the play and read the tap
+   keys.
+3. **`src/chart/chart.ts`** — how a hit object becomes a `ChartObject`.
+4. **`src/input/Pointer.ts`** — how a playfield coordinate becomes a
+   `mousemove`, and how a press becomes a `keydown`.
 
-## Step 2: the common failures
+Each has a single exported entry point, and `test/helpers/siteStub.ts` implements
+the same contract. **Update the stub first**: if you can make the new behaviour
+work in the stub, the test suite tells you whether the engine still plays.
 
-### `via` is null — the game can't be found
+## Procedure
 
-First check which site family is active. On Web osu!mania, most likely
-`window.__PIXI_APP__` went away:
+1. Reproduce in the demo, not on the live site:
+   ```bash
+   npm run build && npm run demo
+   ```
+   Change `demo/stub-game.js` to mimic the new site behaviour.
+2. Write the failing test in `test/engine.test.ts` (or a new file) that
+   describes the new reality.
+3. Change the smallest module that makes it pass. If you find yourself touching
+   `engine.ts`, ask whether the change belongs in the module that owns that
+   knowledge instead.
+4. Run `npm run verify`:
+   ```bash
+   npm run typecheck && npm test && npm run smoke
+   ```
+5. Update `docs/SITE-CONTRACT.md` with whatever you learned. It is the document
+   the next person will trust.
 
-```js
-window.__PIXI_APP__            // WOM sets this during play
-document.querySelectorAll("canvas").length
-```
+## If the site starts checking `isTrusted`
 
-On Ashtonk!mania, check the exported app and live gameplay session:
+There is no sanctioned workaround, and Kismet will not pretend otherwise. The
+honest options are: run the site from source where you control the code, or stop
+using the tool on that deployment. Do not add `isTrusted` spoofing attempts —
+they do not work and they change what this project is.
 
-```js
-window.AshtonkMania?.GameplayScreen?.s
-window.AshtonkMania?.Screens?.currentName
-window.AshtonkMania?.GameplayScreen?.loaderGone
-window.AshtonkMania?.GameplayScreen?.s?.engine?.notes?.length
-```
+## If the site's tap keys change
 
-`via` stays null outside gameplay, after a finished/failed play, or before the
-session has prepared its notes. Keyfall can acquire a prepared chart before
-`loaderGone`; it waits for `PLAY` before sending input.
+Nothing to do. `game.K1keycode`/`K2keycode` are read live, and the panel's
+**Input → Re-read from site** button re-resolves them mid-session. If the player
+rebinds a tap key onto one of Kismet's hotkeys, the panel shows a collision
+warning and the binding can be changed in **More! → Hotkeys**.
 
-If the global is gone, strategy 2 (viewport-sized canvas → fiber) should still
-work. If React changed its internals, check the fiber key prefix:
+## If a new host appears
 
-```js
-Object.keys(document.querySelector("canvas")).filter(k => k.startsWith("__react"))
-```
+Add it to `KNOWN_HOSTS` (or `KNOWN_APEXES` for a wildcard) in
+`src/constants.ts`, and to the `@match` list in `scripts/build.mjs`. Then check
+`test/helpers/domStub.ts`'s default hostname, which the overlay tests rely on.
 
-`detect/fiber.ts` caches the `__reactFiber$` prefix on first success; if React
-renames it, that is the line to update.
+## Versioning
 
-If the `Game` moved somewhere the scan does not reach, widen `scanValue`'s depth
-or add a field to check in `looksLikeGame`. Keep it shape-based — do not match on
-a constructor name.
-
-### `chart` is null but the game is found
-
-The site's field names changed. `detect/buildContext.ts` reads exactly:
-
-```
-game.hitObjects[]      → { type, column, time, endTime }
-game.difficulty.keyCount
-game.startTime / game.endTime
-game.columnKeybinds    → [[primary, secondary], …]
-game.settings.keybinds.keyModes
-game.mods.autoplay
-game.replayPlayer
-game.chartSignature     // adapter-supplied structural identity
-game.chartTimeAtHost    // optional judgement-clock prediction
-game.unsupportedReason  // adapter input conflict
-game.metadata           // optional chart label fields
-```
-
-If `unsupportedReason` is set, `buildContextFromGame` refuses before parsing.
-On Ashtonk!mania that is intentional for replay/spectate/Auto feeds and lanes
-without a usable keyboard binding; normal, daily and multiplayer modes are not
-refused merely for their mode.
-
-Each has a fallback (`readKeyCount` tries `difficulty`, then
-`columnKeybinds.length`, then `inputSystem.pressedColumns.length`). Update the
-`GameLike` interface in `src/types.ts` to match the new shape — it is
-structurally typed on purpose, so a rename is a one-file change.
-
-### `mapping.source` is `"fallback"`
-
-Keybinds moved out of `settings.keybinds.keyModes`. Two options:
-
-- Update `buildKeyMapping` in `detect/buildContext.ts` to read the new location.
-- Or just configure it manually: Right Shift → More! → Input → click a column →
-  press the key. User overrides are persisted and take priority over site reads;
-  the chosen code must still match a binding the game accepts. Re-read from
-  site clears the override.
-
-### Input dispatches but nothing happens
-
-Check whether the site added an `isTrusted` guard:
-
-```js
-// In devtools, on the gameplay page:
-document.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyD", bubbles: true }));
-// Does the receptor light up?
-```
-
-If not, look at what the handler now requires. If it is an `isTrusted` check,
-**there is no fix** — see `docs/SAFETY.md`. The desync verifier will detect this
-within about six checks and stop safely with an explanatory message rather than
-silently doing nothing.
-
-On Ashtonk!mania the site listens on `window` capture rather than `document`
-bubble. A document-dispatched event with `bubbles: true` still reaches it in a
-real browser; if the site moves those listeners into a shadow root or stops
-propagation earlier, check `test/ashtonkAdapter.test.ts`'s window-capture path.
-
-If the receptor lights up but notes are not judged, the column mapping is wrong;
-compare `diagnostics().mapping.codes` against the site's Settings → Keybinds.
-
-### Notes fire but timing is off
-
-```js
-Keyfall.diagnostics().clock
-```
-
-- `confident: false` after several seconds → the fit is not converging. Check
-  `slope`: it should equal the playback rate (1 at normal speed). A slope of 1
-  when the site is at 1.5× means `timeElapsed` stopped following `song.seek()`.
-- `errorMs` large (>10) → inspect what the site uses for `timeElapsed`. A
-  changing-rate mod can also produce a larger residual in the linear fallback;
-  Ashtonk's arbitrary-host `inputTime` prediction should follow the live slope.
-- `discontinuities` climbing steadily → something is being misread as a seek.
-  Check the thresholds at the top of `timing/clock.ts`.
-
-Use the Timing Offset slider (±200ms, 1ms steps) for a constant musical
-correction. That is separate from a broken clock model.
-
-### Timing varies when it should not, or does not when it should
-
-```js
-Keyfall.diagnostics().humanization
-```
-
-- `{ enabled: false }` but timing still looks off — it is not humanization. Check
-  `clock` and the Timing Offset instead.
-- `enabled: true` unexpectedly — it persisted from a previous session. Turn it off
-  in More! → Humanize, or `Keyfall.resetSettings()`.
-- Same seed gives different runs — that is a bug, not a setting. Determinism is
-  tested in `test/humanizer.test.ts`; start with whether `reseed()` is being
-  called on rebuild.
-- Holds are being released early or notes are vanishing on one column — check
-  `clamped` and `releaseClamped`. Rising clamp counts mean the chart is denser
-  than the variation allows; lower `strength`.
-
-### Everything works but holds are wrong
-
-The hold representation changed. `chart/timeline.ts` pass 1 assumes the site
-stores a hold as a head `tap` (`endTime` = hold end) plus a `hold` object. Verify:
-
-```js
-Keyfall.chart.notes.slice(0, 40)
-```
-
-If holds are no longer duplicated, the pre-pass is harmless but `noteCount`
-will be off; if they are duplicated differently, update the `holdKeys` logic.
-
-## Step 3: add a new detection strategy / adapter
-
-Strategies are independent functions in `detect/pixiHook.ts`:
-
-```ts
-export const STRATEGIES: Strategy[] = [
-  { name: "pixiGlobal",    cost: "low",    site: "webosumania",  run: viaPixiGlobal },
-  { name: "ashtonkGlobal", cost: "low",    site: "ashtonkmania", run: viaAshtonkGlobal },
-  { name: "canvasScan",    cost: "medium", site: "webosumania",  run: viaCanvasScan },
-  { name: "fiberProbe",    cost: "high",   site: "webosumania",  run: viaAnyFiber },
-  // add here — ordered cheapest and most reliable first
-];
-```
-
-Each returns `GameLike | null` and is called inside a `try`/`catch`, so a new
-strategy that throws cannot break the others. `acquireGame` filters by
-`siteFamily`, reports which one succeeded, and that string appears in
-`diagnostics().via`.
-
-A new site should normally get one **adapter** that projects its live session
-onto `GameLike`, not a second scheduler or input path. Keep the fair-play guards
-in the adapter's `unsupportedReason`; do not add engine-level exceptions.
-
-## Step 4: verify
-
-```bash
-npm run verify     # typecheck + unit/integration tests + shipped-bundle smoke test
-```
-
-If you changed timing or ordering behaviour, add a test. The two bugs that were
-hardest to find in this codebase — the unbounded spin-wait and the
-catch-up-ignores-offset problem — were both invisible in manual testing and
-obvious under the stubbed clock.
-
-Then check by hand against the real site, in this order:
-
-1. A 4K map with only taps.
-2. A map with holds, including a hold that ends exactly where the next note on
-   that column starts.
-3. A dense stream (jacks faster than 12ms apart at high rate).
-4. 7K or higher, to confirm no 4K assumption leaked in.
-5. Pause and resume mid-hold. Confirm no stuck key.
-6. Change beatmap without refreshing. Confirm the overlay re-detects.
-7. Close the game mid-hold. Confirm no stuck key.
-8. Enable the site's own Autoplay mod. Confirm Keyfall refuses to start.
-9. Enable humanization at strength 1 with hold-release variation and fatigue at
-   maximum, on the densest chart you have. Confirm no stuck key and that every
-   press is matched by a release.
-10. On Ashtonk!mania, check normal, Practice and changing-rate gameplay, active
-    bindings, early arming and high-key hotkey collisions. Replay, spectate and
-    `AT` feeds should still be refused. The optional offline Chromium suite is
-    documented in [`ASHTONK-CONTRACT.md`](./ASHTONK-CONTRACT.md#offline-browser-regression).
-    Its daily and multiplayer cases are local fixtures, not online sessions; the
-    game may submit scores on a real server, so follow that site's rules.
-
-## Reference
-
-- Web osu!mania source: <https://github.com/HecticKiwi/Web-Osu-Mania>
-- Ashtonk!mania source: <https://github.com/ashtonkehler14-glitch/Ashtonk-mania>
-- `.osu` format: <https://osu.ppy.sh/wiki/en/Client/File_formats/osu_(file_format)>
-- osu!mania V2 scoring / hit windows: <https://osu.ppy.sh/wiki/en/Gameplay/Scoring>
-- WOM contract: [`SITE-CONTRACT.md`](./SITE-CONTRACT.md)
-- Ashtonk!mania contract: [`ASHTONK-CONTRACT.md`](./ASHTONK-CONTRACT.md)
+`src/constants.ts` `VERSION`, `package.json` `version` and the userscript header
+must agree; `scripts/build.mjs` reads the first and writes the other two. Bump
+the major when the contract changes in a way a user would notice, and record why
+in the commit message.

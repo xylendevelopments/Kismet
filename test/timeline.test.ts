@@ -1,298 +1,133 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { analyseChart, buildTimeline } from "../src/chart/timeline";
-import type { KeyMapping, ParsedChart, SiteHitObject } from "../src/types";
+import { buildTimeline, activeObjectAt } from "../src/chart/timeline";
+import type { Chart, ChartObject, ObjectKind } from "../src/types";
 
-function mapping(codes: string[]): KeyMapping {
-  return { codes, keyCount: codes.length, source: "site" };
-}
-
-function chart(notes: SiteHitObject[], keyCount: number): ParsedChart {
-  const times = notes.map((n) => n.time);
-  const ends = notes.map((n) => n.endTime);
+function object(
+  index: number,
+  kind: ObjectKind,
+  time: number,
+  endTime = time,
+): ChartObject {
   return {
-    keyCount,
-    notes: [...notes].sort((a, b) => a.time - b.time || a.column - b.column),
-    noteCount: notes.length,
-    startTime: Math.min(...times),
-    endTime: Math.max(...ends),
-    signature: "test",
+    index,
+    kind,
+    x: 100 + index * 10,
+    y: 100,
+    time,
+    endTime,
+    sliderDuration: kind === "slider" ? endTime - time : 0,
+    repeat: kind === "slider" ? 1 : 0,
+    path: kind === "slider" ? [{ x: 100, y: 100 }, { x: 200, y: 100 }] : null,
   };
 }
 
-const tap = (column: number, time: number): SiteHitObject => ({
-  type: "tap",
-  column,
-  time,
-  endTime: time,
-});
-const hold = (column: number, time: number, endTime: number): SiteHitObject => ({
-  type: "hold",
-  column,
-  time,
-  endTime,
-});
+function chart(objects: ChartObject[]): Chart {
+  return {
+    objects,
+    noteCount: objects.length,
+    circles: objects.filter((o) => o.kind === "circle").length,
+    sliders: objects.filter((o) => o.kind === "slider").length,
+    spinners: objects.filter((o) => o.kind === "spinner").length,
+    startTime: objects[0]?.time ?? 0,
+    endTime: objects[objects.length - 1]?.endTime ?? 0,
+    signature: "test",
+    difficulty: { od: 8, ar: 9, cs: 4, hp: 5 },
+    windows: { great: 32, good: 76, meh: 120 },
+  };
+}
 
-describe("timeline", () => {
-  it("emits a press and a release for each tap", () => {
-    const t = buildTimeline(chart([tap(0, 1000), tap(1, 1100)], 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-    });
-    assert.equal(t.actions.length, 4);
+describe("buildTimeline", () => {
+  it("emits a press and a release per object", () => {
+    const timeline = buildTimeline(chart([object(0, "circle", 1000)]), { tapHoldMs: 12 });
+    assert.equal(timeline.actions.length, 2);
     assert.deepEqual(
-      t.actions.map((a) => [a.time, a.type, a.column]),
-      [
-        [1000, "down", 0],
-        [1000, "up", 0],
-        [1100, "down", 1],
-        [1100, "up", 1],
-      ],
+      timeline.actions.map((action) => `${action.type}@${action.time}`),
+      ["down@1000", "up@1012"],
     );
   });
 
-  it("presses at the hold start and releases at the hold end", () => {
-    const t = buildTimeline(chart([hold(2, 1000, 1750)], 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-    });
-    assert.deepEqual(
-      t.actions.map((a) => [a.time, a.type, a.column, a.holdDuration]),
-      [
-        [1000, "down", 2, 750],
-        [1750, "up", 2, 750],
-      ],
+  it("holds a slider for its whole body and a spinner to its end", () => {
+    const timeline = buildTimeline(
+      chart([object(0, "slider", 1000, 1600), object(1, "spinner", 2000, 3500)]),
+      { tapHoldMs: 12 },
     );
+    const ups = timeline.actions.filter((action) => action.type === "up");
+    assert.deepEqual(ups.map((action) => action.time), [1600, 3500]);
   });
 
-  it("releases a hold BEFORE pressing a same-instant note on that column", () => {
-    // This is the ordering that prevents a swallowed press: if the down came
-    // first, the site's `hit()` would see the column already pressed and no-op,
-    // then the up would release it immediately.
-    const t = buildTimeline(chart([hold(1, 1000, 1500), tap(1, 1500)], 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-    });
-    const atBoundary = t.actions.filter((a) => a.time === 1500);
-    // Three, not two: the tap contributes its own release at the same instant
-    // (matching the site's autoplay replay, which emits both at `time`).
-    assert.equal(atBoundary.length, 3);
-    assert.deepEqual(
-      atBoundary.map((a) => a.type),
-      ["up", "down", "up"],
-      "the hold must release before the tap presses, or the press is swallowed",
+  it("never lets a release reach the next press", () => {
+    // A circle with a 50ms tap hold followed by an object 20ms later: the
+    // release must be clamped inside the gap or the next press is swallowed.
+    const timeline = buildTimeline(
+      chart([object(0, "circle", 1000), object(1, "circle", 1020)]),
+      { tapHoldMs: 50 },
     );
-    assert.deepEqual(
-      atBoundary.map((a) => a.column),
-      [1, 1, 1],
-    );
+    const sequence = timeline.actions.map((action) => `${action.type}@${action.time}`);
+    assert.deepEqual(sequence, ["down@1000", "up@1019", "down@1020", "up@1070"]);
   });
 
-  it("preserves site ordering (press before release) for a tap at equal times", () => {
-    const t = buildTimeline(chart([tap(0, 1000)], 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-    });
-    assert.equal(t.actions[0].type, "down");
-    assert.equal(t.actions[1].type, "up");
+  it("keeps press-before-release order for equal timestamps", () => {
+    const timeline = buildTimeline(chart([object(0, "circle", 1000)]), { tapHoldMs: 1 });
+    assert.deepEqual(timeline.actions.map((action) => action.type), ["down", "up"]);
   });
 
-  it("suppresses the duplicated hold-head tap the site stores", () => {
-    // The site pushes BOTH {tap, isHoldHead:true} and {hold} for one hold note.
-    const notes: SiteHitObject[] = [
-      { type: "tap", column: 3, time: 1000, endTime: 1600 }, // head tap
-      { type: "hold", column: 3, time: 1000, endTime: 1600 }, // the hold
-    ];
-    const t = buildTimeline(chart(notes, 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-    });
-    assert.deepEqual(
-      t.actions.map((a) => [a.time, a.type]),
-      [
-        [1000, "down"],
-        [1600, "up"],
-      ],
+  it("sorts objects and exposes press times", () => {
+    const timeline = buildTimeline(
+      chart([object(0, "circle", 1000), object(1, "circle", 1300), object(2, "circle", 1600)]),
+      { tapHoldMs: 12 },
     );
-    assert.equal(t.noteCount, 1);
+    assert.deepEqual(timeline.notePressTimes, [1000, 1300, 1600]);
+    assert.equal(timeline.noteCount, 3);
+    assert.equal(timeline.firstActionTime, 1000);
+    assert.equal(timeline.lastActionTime, 1612);
   });
 
-  it("handles simultaneous chords in column order", () => {
-    const t = buildTimeline(
-      chart([tap(0, 1000), tap(1, 1000), tap(2, 1000), tap(3, 1000)], 4),
-      { keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]) },
-    );
-    const downs = t.actions.filter((a) => a.type === "down");
-    assert.deepEqual(
-      downs.map((a) => a.column),
-      [0, 1, 2, 3],
-    );
-    assert.ok(downs.every((a) => a.simultaneous), "chord actions must be flagged simultaneous");
+  it("applies a constant offset to every action", () => {
+    const timeline = buildTimeline(chart([object(0, "circle", 1000)]), { offset: -25, tapHoldMs: 10 });
+    assert.equal(timeline.actions[0].time, 975);
+    assert.equal(timeline.actions[1].time, 985);
   });
 
-  it("keeps overlapping holds independent in the timeline", () => {
-    // Column 1 hold 1000-2000, a tap on column 3 at 1200, column 4 hold
-    // 1000-1800. The two holds must not interfere with each other or with the
-    // tap in between.
-    const notes: SiteHitObject[] = [
-      hold(0, 1000, 2000),
-      tap(2, 1200),
-      hold(3, 1000, 1800),
-    ];
-    const t = buildTimeline(chart(notes, 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-    });
-
-    assert.deepEqual(
-      t.actions.map((a) => [a.time, a.type, a.column]),
-      [
-        [1000, "down", 0],
-        [1000, "down", 3],
-        [1200, "down", 2],
-        [1200, "up", 2], // tap release; InputManager defers it by minTapHoldMs
-        [1800, "up", 3],
-        [2000, "up", 0],
-      ],
-    );
-  });
-
-  it("never releases a hold before its own end time", () => {
-    const notes: SiteHitObject[] = [
-      hold(0, 1000, 3000),
-      hold(1, 1200, 1500),
-      hold(2, 1300, 2800),
-      tap(3, 1400),
-    ];
-    const t = buildTimeline(chart(notes, 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-    });
-
-    for (const column of [0, 1, 2]) {
-      const down = t.actions.find((a) => a.type === "down" && a.column === column);
-      const up = t.actions.find((a) => a.type === "up" && a.column === column);
-      assert.ok(down && up, `column ${column} needs a press and a release`);
-      const source = notes.find((n) => n.column === column && n.type === "hold")!;
-      assert.equal(down.time, source.time);
-      assert.equal(up.time, source.endTime);
-      assert.equal(up.holdDuration, source.endTime - source.time);
-    }
-  });
-
-  it("handles jacks (rapid same-column repeats)", () => {
-    const t = buildTimeline(
-      chart([tap(1, 1000), tap(1, 1050), tap(1, 1100), tap(1, 1150)], 4),
-      { keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]) },
-    );
-    assert.equal(t.actions.length, 8);
-    assert.equal(t.analysis.jacks, 3);
-    assert.equal(t.analysis.minJackInterval, 50);
-  });
-
-  it("assigns monotonic seq numbers after sorting", () => {
-    const t = buildTimeline(
-      chart([tap(0, 1000), tap(1, 1000), tap(2, 900)], 4),
-      { keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]) },
+  it("carries the humanizer's deltas into press and release", () => {
+    const deltas = new Map<number, number>([[0, 7], [1, -4]]);
+    const humanizer = {
+      prepare() { /* nothing to do */ },
+      deltaAt: (index: number) => deltas.get(index) ?? 0,
+      releaseExtraAt: () => 3,
+    };
+    const timeline = buildTimeline(
+      chart([object(0, "circle", 1000), object(1, "slider", 2000, 2600)]),
+      { tapHoldMs: 10, humanizer },
     );
     assert.deepEqual(
-      t.actions.map((a) => a.seq),
-      t.actions.map((_, i) => i),
-    );
-    assert.equal(t.actions[0].time, 900);
-  });
-
-  it("applies a timing offset to every action", () => {
-    const t = buildTimeline(chart([tap(0, 1000), hold(1, 1200, 1800)], 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-      offset: -15,
-    });
-    assert.deepEqual(
-      t.actions.map((a) => a.time),
-      [985, 985, 1185, 1785],
+      timeline.actions.map((action) => `${action.type}@${action.time}`),
+      ["down@1007", "up@1017", "down@1996", "up@2599"],
     );
   });
 
-  it("emits actions for secondary keybinds when enabled", () => {
-    const t = buildTimeline(chart([tap(0, 1000)], 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-      useSecondaryKeybind: true,
-      secondaryCodes: ["KeyS", null, null, null],
-    });
-    const downs = t.actions.filter((a) => a.type === "down");
-    assert.deepEqual(
-      downs.map((a) => a.code).sort(),
-      ["KeyD", "KeyS"],
+  it("clamps a humanised release against the following press", () => {
+    const humanizer = {
+      prepare() { /* no-op */ },
+      deltaAt: () => 0,
+      releaseExtraAt: () => 40,
+    };
+    const timeline = buildTimeline(
+      chart([object(0, "slider", 1000, 1600), object(1, "circle", 1800)]),
+      { humanizer },
     );
-  });
-
-  it("skips notes whose column is out of range instead of throwing", () => {
-    const t = buildTimeline(chart([tap(0, 1000), tap(9, 1100)], 4), {
-      keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]),
-    });
-    assert.equal(t.actions.some((a) => a.column === 9), false);
-    assert.equal(t.actions.length, 2); // only column 0's press+release
-  });
-
-  it("throws when the mapping is too short for the chart", () => {
-    assert.throws(
-      () => buildTimeline(chart([tap(0, 1000)], 7), { keyMapping: mapping(["KeyD", "KeyF"]) }),
-      /covers 2 columns but the chart needs 7/,
-    );
-  });
-
-  it("sorts notePressTimes for binary-search progress", () => {
-    const t = buildTimeline(
-      chart([tap(0, 1500), tap(1, 1000), tap(2, 1200)], 4),
-      { keyMapping: mapping(["KeyD", "KeyF", "KeyJ", "KeyK"]) },
-    );
-    assert.deepEqual(t.notePressTimes, [1000, 1200, 1500]);
+    const ups = timeline.actions.filter((action) => action.type === "up");
+    assert.ok(ups[0].time < 1800, "release must stay ahead of the next press");
   });
 });
 
-describe("analyseChart", () => {
-  it("counts taps and holds once each", () => {
-    const notes = [tap(0, 1000), tap(1, 1100), hold(2, 1200, 1600)];
-    const analysis = analyseChart(notes, []);
-    assert.equal(analysis.taps, 2);
-    assert.equal(analysis.holds, 1);
-  });
-
-  it("detects chords and the largest chord size", () => {
-    const notes = [tap(0, 1000), tap(1, 1000), tap(2, 1000), tap(3, 1200)];
-    const analysis = analyseChart(notes, []);
-    assert.equal(analysis.largestChord, 3);
-    assert.equal(analysis.chords, 3);
-  });
-
-  it("measures peak NPS over a one second window", () => {
-    // 10 notes inside 500ms, then a gap.
-    const notes = Array.from({ length: 10 }, (_, i) => tap(i % 4, 1000 + i * 50));
-    notes.push(tap(0, 5000));
-    const presses = notes.map((n, i) => ({
-      seq: i,
-      time: n.time,
-      type: "down" as const,
-      column: n.column,
-      code: "KeyD",
-      simultaneous: false,
-      holdDuration: 0,
-    }));
-    const analysis = analyseChart(notes, presses);
-    assert.equal(analysis.peakNps, 10);
-  });
-
-  it("measures the longest stream", () => {
-    const notes = Array.from({ length: 8 }, (_, i) => tap(i % 4, 1000 + i * 40));
-    const presses = notes.map((n, i) => ({
-      seq: i,
-      time: n.time,
-      type: "down" as const,
-      column: n.column,
-      code: "KeyD",
-      simultaneous: false,
-      holdDuration: 0,
-    }));
-    const analysis = analyseChart(notes, presses);
-    assert.equal(analysis.longestStream, 8);
-  });
-
-  it("does not divide by zero on a single-note chart", () => {
-    const analysis = analyseChart([tap(0, 1000)], []);
-    assert.ok(Number.isFinite(analysis.averageNps));
-    assert.equal(analysis.minJackInterval, 0);
+describe("activeObjectAt", () => {
+  it("finds the slider body the cursor is inside", () => {
+    const objects = [object(0, "circle", 1000), object(1, "slider", 2000, 2600), object(2, "circle", 3000)];
+    assert.equal(activeObjectAt(objects, 1500), null);
+    assert.equal(activeObjectAt(objects, 2300)?.index, 1);
+    assert.equal(activeObjectAt(objects, 2700), null);
+    assert.equal(activeObjectAt(objects, 2999), null);
+    assert.equal(activeObjectAt(objects, 3000)?.index, 2);
   });
 });

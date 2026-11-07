@@ -3,135 +3,93 @@ import type { HumanizationConfig } from "./humanize/humanizer";
 /**
  * Shared type vocabulary for the whole tool.
  *
- * These types deliberately mirror the *observable* shape of Web osu!mania's
+ * These types deliberately mirror the *observable* shape of webosu!'s
  * internals rather than importing them: the tool runs as an injected script
  * with no build-time access to the site's modules. Everything here is
  * structurally typed so that minor site refactors keep working.
- */
-
-/** osu!mania gameplay states, as exposed by the site's `Game.state`. */
-export type SiteGameState = "WAIT" | "PLAY" | "PAUSE" | "UNPAUSE" | "FAIL";
-
-/**
- * A tap note.
  *
- * `endTime` is normally equal to `time` — but NOT for a hold's head object,
- * which the site stores as a *tap* carrying the hold's end time. That is the
- * only marker identifying the head, so it must survive every copy and sort;
- * collapsing it to `time` (as an earlier version did while "normalising taps")
- * makes the head indistinguishable from a real tap, and the timeline then
- * emits a duplicate press plus a deferred release that lets go of the hold
- * milliseconds after it started.
+ * The site's own vocabulary (`Playback`, `hitObjects`, `circle`/`slider`/
+ * `spinner`, `mouseX`/`mouseY`, `K1keycode`) is preserved on purpose: it makes
+ * `docs/SITE-CONTRACT.md` checkable against the site's source line by line.
  */
-export interface TapNote {
-  type: "tap";
-  column: number;
-  time: number;
-  endTime: number;
-  /** Present on the site's hold-head tap. Optional: `endTime > time` implies it. */
-  isHoldHead?: boolean;
+
+export interface Point {
+  x: number;
+  y: number;
 }
 
-/** A hold note: press at `time`, release at `endTime`. */
-export interface HoldNote {
-  type: "hold";
-  column: number;
-  time: number;
-  endTime: number;
-}
-
-export type SiteHitObject = TapNote | HoldNote;
-
-/** Per-column keybind pair, exactly as the site stores it (`[primary, secondary]`). */
-export type ColumnKeybind = [string | null, string | null];
+/** The three object types osu!standard (and webosu!) uses. */
+export type ObjectKind = "circle" | "slider" | "spinner";
 
 /**
- * The subset of the site's live `Game` instance that this tool depends on.
- * Kept intentionally small: the narrower the contract, the more resilient
- * the tool is to site changes. See docs/SITE-CONTRACT.md.
+ * One object mirrored out of the site's live chart.
+ *
+ * Only the fields Kismet needs are copied; the site's object also carries Pixi
+ * sprites, judgements and Howl references, and holding those alive across a
+ * retry is how a helper like this leaks memory.
  */
-export interface GameLike {
-  state: SiteGameState;
-  /** Chart time of the playhead, in ms. Derived from the audio element. */
-  timeElapsed: number;
-  startTime: number;
+export interface ChartObject {
+  /** Position in the chart, ascending by `time`. */
+  index: number;
+  kind: ObjectKind;
+  /** Hit position in osu! pixels. For a spinner this is the playfield centre. */
+  x: number;
+  y: number;
+  /** Chart time of the object's hit moment, ms. */
+  time: number;
+  /**
+   * Chart time the object stops needing the cursor/button, ms.
+   * Equal to `time` for a circle, the last slider tick for a slider, and the
+   * end of the spin for a spinner.
+   */
   endTime: number;
-  hitObjects: SiteHitObject[];
-  difficulty: { keyCount: number; od?: number; hp?: number };
-  /** Resolved keybinds for the active key count: `[primary, secondary]` per column. */
-  columnKeybinds?: ColumnKeybind[] | null;
-  settings?: {
-    keybinds?: {
-      keyModes?: ColumnKeybind[][];
-      pause?: string | null;
-      retry?: string | null;
-      toggleHud?: string | null;
-    };
-    mods?: { autoplay?: boolean; playbackRate?: number };
-  };
-  mods?: { autoplay?: boolean; playbackRate?: number };
-  inputSystem?: {
-    pressedColumns?: boolean[];
-    tappedColumns?: boolean[];
-    hit?: (column: number, time?: number) => void;
-    release?: (column: number, time?: number) => void;
-  };
-  scoreSystem?: Record<string, unknown> | null;
-  /** Site-provided beatmap metadata, used only for the overlay's chart label. */
-  metadata?: { title?: string; artist?: string; version?: string };
-  /** Optional cheap liveness probe, avoiding conversion of a site's full chart. */
-  hasHitObjects?: boolean;
-  /** Cheap identity for session/engine/array replacements, not in-place note edits. */
-  chartRevision?: string;
-  /** Optional adapter-supplied structural fingerprint for the active chart. */
-  chartSignature?: string;
-  /** Optional read-only judgement clock at a performance.now() timestamp. */
-  chartTimeAtHost?: (hostTime: number) => number | null;
-  /** Set when a site adapter cannot drive the current input path. */
-  unsupportedReason?: string;
-  /** Present while a site replay is driving input. */
-  replayPlayer?: unknown;
-  accuracyText?: { text?: string } | null;
-  comboText?: { text?: string } | null;
-  scoreText?: { text?: string } | null;
-  song?: { seek?: () => number; playing?: () => boolean; rate?: () => number };
-  audioOffset?: number;
-  /** Pixi application, present on the real `Game`. Used as a liveness marker. */
-  app?: unknown;
-  dispose?: () => void;
+  /** Slider duration of one repeat, ms. `0` for circles and spinners. */
+  sliderDuration: number;
+  /** Number of slider repeats, `>= 1`. `0` for circles and spinners. */
+  repeat: number;
+  /**
+   * Pre-sampled slider path in osu! pixels, already unrolled across repeats so
+   * a plain interpolation over `[0, 1]` walks the whole slider once. `null` for
+   * circles and spinners.
+   */
+  path: Point[] | null;
 }
 
 /** A normalised, engine-owned view of the chart. */
-export interface ParsedChart {
-  keyCount: number;
-  notes: SiteHitObject[];
-  /** Total note count (holds count once, not twice). */
+export interface Chart {
+  objects: ChartObject[];
+  /** Circles + sliders + spinners. */
   noteCount: number;
+  circles: number;
+  sliders: number;
+  spinners: number;
+  /** Chart time of the first and last object, ms. */
   startTime: number;
   endTime: number;
   /** Stable identity used to detect "the user switched beatmaps". */
   signature: string;
   /** Human-readable label for the UI, best effort. */
   label?: string;
+  /** Difficulty values the site derived from the beatmap, for the readout. */
+  difficulty: { od: number; ar: number; cs: number; hp: number };
+  /** Judgement windows the site will use, ms. */
+  windows: { great: number; good: number; meh: number };
 }
 
-/** A single scheduled physical key action. */
+/** A single scheduled cursor action. */
 export interface InputAction {
-  /** Monotonic index; preserves ordering for replay compatibility. */
+  /** Monotonic index; preserves ordering for same-timestamp batches. */
   seq: number;
   /** Absolute chart time in ms at which this action should land. */
   time: number;
   type: "down" | "up";
-  column: number;
-  /** The keybind `code` actually dispatched (e.g. `"KeyD"`). */
-  code: string;
-  /**
-   * True when several actions share the exact same timestamp. Used to keep
-   * same-frame simultaneous inputs in a deterministic order.
-   */
+  /** The object this action belongs to. */
+  objectIndex: number;
+  /** Where the cursor must be, in osu! pixels, when a `down` fires. */
+  x: number;
+  y: number;
+  /** True when another action shares the exact same timestamp. */
   simultaneous: boolean;
-  /** For hold edges: the hold's original duration in ms. 0 for taps. */
-  holdDuration: number;
 }
 
 export type EnginePhase =
@@ -144,30 +102,43 @@ export type EnginePhase =
   | "ERROR";
 
 export interface EngineStats {
-  notesTotal: number;
-  notesRemaining: number;
-  actionsFired: number;
-  pressesDown: number;
-  releasesUp: number;
-  /** Notes the site judged, read back from its own HUD when available. */
+  objectsTotal: number;
+  objectsRemaining: number;
+  taps: number;
+  /** Chart time of the playhead, ms. */
+  timeElapsed: number;
+  /** Objects the site has judged (all judgements, misses included). */
   hits: number;
+  /** Hits that were not misses. */
+  judgedGood: number;
   combo: number;
   accuracy: number | null;
   score: number | null;
-  /** Chart time of the playhead, ms. */
-  timeElapsed: number;
   /** Wall-clock scheduling error of the last fired action, ms. Signed. */
   lastJitter: number;
   /** Rolling average absolute scheduling error, ms. */
   avgJitter: number;
+  /** Whether the cursor button is currently held. */
+  holding: boolean;
 }
 
-export interface KeyMapping {
-  /** Column index -> keybind `code`. */
-  codes: string[];
-  keyCount: number;
-  /** Where the mapping came from, for diagnostics. */
-  source: "site" | "user" | "fallback";
+/**
+ * The site's two tap keys, read live from `game.K1keycode` / `game.K2keycode`.
+ *
+ * webosu! binds gameplay clicks to two key codes (Z and X by default, but the
+ * site's Input settings can rebind them), plus optionally the mouse buttons.
+ * Kismet presses one of these through the page's own listeners.
+ */
+export interface TapKeys {
+  /** Virtual key code of the site's primary tap key. */
+  primary: number | null;
+  secondary: number | null;
+  /** Which one Kismet presses. */
+  active: "primary" | "secondary";
+  /** The key code that will actually be dispatched. */
+  code: number | null;
+  /** Where the code came from, for diagnostics. */
+  source: "site" | "fallback";
 }
 
 export type HotkeyAction =
@@ -198,10 +169,12 @@ export interface Settings {
     spinThreshold: number;
   };
   input: {
-    /** User overrides, keyed by key count, e.g. `{ "4": ["KeyD", ...] }`. */
-    keyMappings: Record<string, string[]>;
-    /** Press both keybinds of a column when the site has two bound. */
-    useSecondaryKeybind: boolean;
+    /** Which of the site's tap keys to press. */
+    tapKey: "primary" | "secondary";
+    /** Circle/press hold length in ms. */
+    tapHold: number;
+    /** Spinner rotation speed, revolutions per second. */
+    spinRate: number;
     hotkeys: Record<HotkeyAction, string>;
   };
   appearance: {
@@ -209,15 +182,14 @@ export interface Settings {
     opacity: number;
     accent: string;
     position: { x: number; y: number };
-    /** Legacy stored value; the trainer panel no longer has a mini-bar. */
+    /** Legacy stored value; the panel no longer has a mini-bar. */
     collapsed: boolean;
     size: { w: number; h: number };
   };
   /**
    * Deliberate timing variation. Off by default: frame-exact playback is the
    * honest baseline, and enabling this makes a run intentionally imperfect.
-   * See src/humanize/humanizer.ts for what each control does and for the
-   * ordering invariants the perturbation must not break.
+   * See src/humanize/humanizer.ts for what each control does.
    */
   humanization: HumanizationConfig;
 }
@@ -227,8 +199,127 @@ export interface DetectionResult {
   ok: boolean;
   /** Which strategy produced the result. */
   via?: string;
-  game?: GameLike;
-  chart?: ParsedChart;
-  keyMapping?: KeyMapping;
+  chart?: Chart;
+  tapKeys?: TapKeys;
   reason?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* The site's own shapes, as observed. Read-only by contract.          */
+/* ------------------------------------------------------------------ */
+
+/** A slider curve, as exposed by the site's `SliderMesh`/curve classes. */
+export interface SiteSliderCurve {
+  pointAt(t: number): Point;
+  curve?: Point[];
+}
+
+/** One entry of `playback.hits` (a shallow copy of a parsed hit object). */
+export interface SiteHitObject {
+  type?: string;
+  x: number;
+  y: number;
+  time: number;
+  endTime?: number;
+  repeat?: number;
+  sliderTime?: number;
+  sliderTimeTotal?: number;
+  score?: number;
+  curve?: SiteSliderCurve;
+  ball?: { x: number; y: number };
+  [key: string]: unknown;
+}
+
+export interface SiteTrackMetadata {
+  Title?: string;
+  Artist?: string;
+  Version?: string;
+  Creator?: string;
+  [key: string]: unknown;
+}
+
+export interface SiteTrack {
+  metadata?: SiteTrackMetadata;
+  difficulty?: Record<string, number>;
+  hitObjects?: SiteHitObject[];
+  [key: string]: unknown;
+}
+
+/** The site's `Audio` wrapper (see its `osu-audio.js`). */
+export interface SiteAudio {
+  getPosition(): number;
+  playing?: boolean;
+  currentTime?: number;
+  playbackRate?: number;
+}
+
+/** The site's `ScoreOverlay` (see its `overlay/score.js`). */
+export interface SiteScoreOverlay {
+  score?: number;
+  combo?: number;
+  maxcombo?: number;
+  judgecnt?: { great?: number; good?: number; meh?: number; miss?: number };
+  judgeTotal?: number;
+  maxJudgeTotal?: number;
+  [key: string]: unknown;
+}
+
+/**
+ * The site's live `Playback` scene.
+ *
+ * Published as `window.playback` by the constructor and also reachable as
+ * `window.game.scene`.
+ */
+export interface SitePlayback {
+  hits: SiteHitObject[];
+  track: SiteTrack;
+  osu: { audio: SiteAudio } & Record<string, unknown>;
+  game: SiteGame;
+  scoreOverlay?: SiteScoreOverlay;
+  audioReady?: boolean;
+  ended?: boolean;
+  /** Judgement windows, ms, derived from the beatmap's OD. */
+  GreatTime?: number;
+  GoodTime?: number;
+  MehTime?: number;
+  circleRadius?: number;
+  approachTime?: number;
+  /** Playhead correction the site applies on top of the audio position. */
+  offset?: number;
+  /** Set by the site when the scene is disposed. */
+  destroy?: () => void;
+}
+
+/** The site's global `game` state object (see its `initgame.js`). */
+export interface SiteGame {
+  scene?: SitePlayback | null;
+  window?: Window;
+  mouseX: number;
+  mouseY: number;
+  down: boolean;
+  K1keycode?: number;
+  K2keycode?: number;
+  K1down?: boolean;
+  K2down?: boolean;
+  M1down?: boolean;
+  M2down?: boolean;
+  allowMouseButton?: boolean;
+  autoplay?: boolean;
+  hardrock?: boolean;
+  easy?: boolean;
+  nightcore?: boolean;
+  daycore?: boolean;
+  finished?: boolean;
+  /** The site's cursor position predictor. */
+  mouse?: ((t: number) => { x: number; y: number; r: number }) | null;
+  stage?: unknown;
+  [key: string]: unknown;
+}
+
+/** `window.gfx`: the letterboxed mapping between osu! pixels and CSS pixels. */
+export interface SiteGfx {
+  width: number;
+  height: number;
+  xoffset: number;
+  yoffset: number;
 }

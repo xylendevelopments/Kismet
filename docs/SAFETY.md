@@ -1,153 +1,92 @@
 # Safety, scope and honest limitations
 
-## What Keyfall is
+## What Kismet is
 
-Browser-side gameplay automation for supported browser rhythm games running in
-your own browser tab. It reads the chart the page has already loaded and
-dispatches ordinary DOM `KeyboardEvent`s on `document`. On Ashtonk!mania it can
-drive normal, Practice, multiplayer, daily and variable-speed gameplay, but
-refuses replay, spectate and Auto/AT feeds that do not accept gameplay keys.
+Browser-side gameplay automation for [webosu!](https://webosu-online.netlify.app/)
+running in your own tab. It reads the chart the page has already loaded, models
+the site's audio clock, and dispatches ordinary DOM `MouseEvent`s and
+`KeyboardEvent`s on `window` — the same events a player's hands produce.
 
-It is built entirely from standard, publicly documented browser APIs:
-`addEventListener`, `dispatchEvent`, `KeyboardEvent`, `performance.now`,
-`requestAnimationFrame`, `setTimeout`, `MessageChannel`, `fetch` observation,
-`localStorage`, canvas and DOM inspection.
+It is built from standard browser APIs only: `addEventListener`, `dispatchEvent`,
+`performance.now`, `requestAnimationFrame`, `MessageChannel`, `setTimeout`,
+`localStorage` and DOM inspection.
 
-## What Keyfall is not
+## What Kismet is not
 
-None of the following are implemented, and none are achievable from the
-position Keyfall occupies:
-
-- **No anti-cheat bypass.** Nothing here evades detection. Quite the opposite —
-  see the `isTrusted` note below.
-- **No `isTrusted` spoofing.** Synthetic events are dispatched honestly and
-  remain `isTrusted === false`. There is no attempt to forge trusted input, and
-  in a browser there is no legitimate way to.
-- **No browser security bypass.** No sandbox escapes, no cross-origin access, no
-  CSP circumvention, no privileged APIs.
-- **No credential or cookie access.** `document.cookie` is never read. No
-  storage belonging to the site is read or written; the tool's own settings live
-  under a single namespaced `localStorage` key.
-- **No direct account or score-submission calls.** Keyfall does not submit forms,
-  call authenticated endpoints or call `Verified.submit`. It does send gameplay
-  input, and the game may save or submit the resulting play through its own flow.
-- **No network modification.** The `.osz` sniffer is strictly read-only:
-  responses are `clone()`d and observed, requests are never altered, blocked,
-  delayed or replayed.
-- **No remote code execution.** No `eval` of remote content, no dynamic remote
-  script loading in the shipped bundle.
-- **No memory manipulation.** Not possible from JavaScript, and not attempted.
+- **Not the site's Autoplay.** The built-in mod is never enabled, called or
+  relied upon. Kismet produces its own chart, its own clock and its own input.
+- **No `isTrusted` spoofing.** Synthetic events are dispatched honestly and stay
+  `isTrusted === false`. There is no attempt to forge trusted input, and in a
+  browser there is no legitimate way to.
+- **No anti-cheat bypass, no sandbox escape, no CSP circumvention.**
+- **No credential, cookie or site-storage access.** Kismet never reads
+  `document.cookie` and never writes the site's `localStorage`; its own settings
+  live under the single key `kismet:settings:v2`.
+- **No network activity.** The bundle makes no requests: no fetches, no
+  `XMLHttpRequest`, no remote script or font loading. The font, CSS and artwork
+  are inlined at build time.
+- **No remote code execution.** Nothing is `eval`'d from the network.
+- **No modification of the site's objects.** Kismet reads `game`, `playback` and
+  `gfx`; it never assigns to them and never calls their methods.
 
 ## The honest limitation
 
-Every input Keyfall produces is `isTrusted === false`. Any site that checks
-`event.isTrusted` — a one-line change in `handleKeyDown` — renders this entire
-approach inert. Neither supported site requires trusted keyboard events for the
-local input paths Keyfall uses today, which is the only reason this works at all.
+Every event Kismet produces is `isTrusted === false`. If the site ever adds
+`if (!event.isTrusted) return;` to its `keydown` handler, this approach stops
+working — and that is the site's prerogative. Kismet is a client-side
+convenience, not an adversarial capability.
 
-That asymmetry is worth stating plainly: Keyfall is not robust against a site
-author who decides they do not want it. It is a client-side convenience, not an
-adversarial capability.
+It also depends on the site's globals (`window.playback`, `window.game`,
+`window.gfx`). A refactor that renames them disables the tool until
+`src/detect/playbackSource.ts` is updated. That is by design: reading
+documented state is more honest and more stable than reaching into a renderer's
+internals, and when it breaks it breaks loudly, in one file.
+
+## Guarantees, and where they are tested
+
+| Guarantee | Enforced by | Test |
+| --- | --- | --- |
+| Never runs while the site's Autoplay is on | `playbackBlocker()` in `detect/playbackSource.ts` | `test/engine.test.ts` "refuses to run…" |
+| Never presses without a matching release | `Pointer.releaseAll()` | `test/pointer.test.ts`, `test/engine.test.ts` |
+| Releases on window blur | `Guards` | `test/guards.test.ts` |
+| Releases on tab hide | `Guards` | `test/guards.test.ts` |
+| Releases on pagehide/unload | `Guards` | `test/guards.test.ts` |
+| Releases when the site pauses | engine pause mirroring | `test/engine.test.ts` "pauses and releases…" |
+| Releases when gameplay exits | `tryDetect()` teardown | `test/engine.test.ts` "stops cleanly…" |
+| Releases on a 20 s stuck hold | watchdog | `test/guards.test.ts` |
+| Releases after three dead liveness probes | watchdog | `test/guards.test.ts` |
+| Releases on `stop()` and `emergencyStop()` | engine | `test/engine.test.ts` |
+| No `preventDefault`/`stopPropagation` on gameplay input | `Pointer`, `HotkeyManager` | `test/pointer.test.ts`, `test/overlay.test.ts` |
+| Every dispatched event is synthetic | `Pointer` | `scripts/smoke.mjs` |
+| No dropped or doubled taps in a full chart | scheduler + stats | `test/engine.test.ts`, `scripts/smoke.mjs` |
+| The panel cannot be opened by a page script | `isTrusted` filter | `test/overlay.test.ts`, `scripts/smoke.mjs` |
+
+The smoke test asserts these against the *shipped bundle*, not the sources, so a
+bundling mistake cannot hide a broken guarantee.
+
+## Hotkey collisions
+
+The site's defaults are Z and X for taps, Escape for pause, Ctrl for skip. A
+Kismet action hotkey that shares a code with a tap key would fire on every note,
+so `HotkeyManager` compares its bindings against `game.K1keycode/K2keycode` and:
+
+- still works (the tool must be controllable), but
+- shows a warning in the panel, and
+- names the binding so the player can change either side.
+
+The panel shortcut (Right Shift) is fixed rather than configurable, and cannot
+be captured by the rebinding UI.
 
 ## Fair play
 
-Ashtonk!mania has ranked, multiplayer and daily-challenge leaderboards. Since
-Keyfall now drives those normal input paths, **the game may submit an automated
-play through its own score flow**, even though Keyfall does not call submission
-APIs. The offline tests do not establish whether a server would accept a play.
-Follow the site's rules: do not submit or claim automated leaderboard scores as
-your own, and do not use humanization to make an automated score look legitimate.
+webosu! has no meaningful leaderboards, which is why the site ships an Autoplay
+mod at all. Even so: do not submit or claim an automated play as your own on any
+site that ranks them, and do not use humanization to make an automated score
+look legitimate. Humanization exists to study how timing variation affects
+judgement, not to disguise automation.
 
-Both supported sites ship their own Autoplay/Auto feature. If you simply want
-to watch a map played perfectly using the developer's sanctioned feature, use
-that instead. Keyfall explicitly refuses to run while either built-in Auto mod
-is enabled, and never calls `generateAutoReplay` or `generateAutoInputs`.
-Replay and spectate feeds are also incompatible with keyboard gameplay input.
+## Scope
 
-Use this for practice reference, pattern study, testing your own charts,
-accessibility, or watching a map you cannot yet play.
-
-## Humanization is not evasion
-
-The optional humanization engine adds reproducible timing variation — seeded,
-with drift, fatigue and pattern-aware tightening. It is worth being blunt about
-what that is and is not.
-
-It **is** a practice and analysis tool: you cannot learn how much slack a pattern
-tolerates from a run that never varies, and a machine-perfect run tells you
-nothing about the margin between "hit" and "miss" on a given chart.
-
-It **is not** detection evasion, and it cannot become that. Every event Keyfall
-dispatches is `isTrusted === false`. Humanization changes *when* an event is sent;
-it does not change *what* the event is. A site that checked `isTrusted` would be
-completely unaffected by any amount of timing variation, and would see every
-synthetic keystroke just as plainly.
-
-The variation is also deterministic from a seed, which is the opposite of what
-evasion would want: two runs with the same seed produce byte-identical timing.
-That is a deliberate trade. Reproducibility is what makes a humanized run
-comparable, debuggable and worth studying; anything else would be noise.
-
-Ranked/shared leaderboards exist on Ashtonk!mania. A humanized run would be no
-more legitimate than a precise automated one, and no harder to detect; the game
-may submit it if a submitting mode is used.
-
-## Runtime safety
-
-The requirement that mattered most while building this was: **never leave a key
-stuck.** A pinned column on a rhythm game is not a cosmetic bug — it drains HP,
-breaks the run, and can persist into the next screen. Defences, in layers:
-
-1. **Every teardown path releases first.** `stop()`, `pause()`,
-   `emergencyStop()`, `dispose()`, chart completion, play failure, detection
-   loss — all call `InputManager.releaseAll()` before anything else.
-2. **A 100ms state monitor** (`Engine.checkSiteState`) checks that the game is
-   still alive and still in `PLAY`. It runs on a timer rather than on the firing
-   path, because a failure between notes would otherwise go unnoticed with a
-   hold still down. It covers `RUNNING`, `PAUSED` and `READY`: a play can fail
-   after the last action, while the site transitions to its results screen.
-3. **A 500ms guards watchdog** (`engine/guards.ts`) checks held keys against the
-   chart clock and queued releases. A genuine long hold with a future tail is not
-   treated as stuck. An overdue queued tail gets one cycle to recover if the
-   watchdog wakes first after a stall; unrecovered or unscheduled stuck keys still
-   trigger a release and safe stop.
-4. **Lifecycle listeners**: `visibilitychange`, `pagehide`, `beforeunload` and
-   `blur` all release keys. A hidden tab gets throttled timers, so visibility
-   loss triggers a safe stop rather than continuing to fire late.
-5. **Input-state verification**: after dispatching, our held set is compared
-   against the site's own `inputSystem.pressedColumns`. A persistent mismatch
-   means the keybinds changed underneath us, so the engine stops instead of
-   playing garbage.
-6. **A stuck-key release even without a recorded press.** If the site believes a
-   column is down and we have no record of pressing it, we dispatch the release
-   anyway. A spurious `keyup` is harmless; a missing one is not.
-7. **Bounded everything.** Catch-up keeps at most
-   `MAX_CATCHUP_ACTIONS_PER_FRAME` overdue actions, skipping older whole batches
-   while preserving future notes. Skipped hold releases are reconciled without
-   interrupting holds that are still active. The precision spin-wait has both an
-   absolute deadline and an iteration cap, so a bad clock cannot freeze the tab.
-8. **Errors never escape.** Every strategy, emitter subscriber, scheduled task
-   and dispatch is wrapped; a throw degrades to a log line and a safe stop with
-   `Autoplay stopped safely.`
-
-## Known failure modes
-
-| Situation | Behaviour |
-|---|---|
-| Site adds an `isTrusted` check | Input silently stops registering; the desync verifier detects it within ~6 checks and stops safely with an explanatory message |
-| `random` mod enabled | Live-game path works. The `.osu` fallback path refuses, because the column permutation is generated at runtime and never persisted |
-| Site's Autoplay / `AT` mod enabled | Refuses to start, with a message telling you to disable it |
-| A replay is playing | Refuses to start; the site's `ReplayPlayer` / `s.feed` already drives input |
-| Ashtonk!mania normal, ranked, multiplayer or daily play | The game may submit the play; server acceptance is untested. Do not claim an automated leaderboard score |
-| Ashtonk!mania changing playback speed | The scheduler retargets using the current judgement clock; abrupt changes or a blocked main thread can still cause timing errors |
-| Main-thread lag spike | The scheduler resumes with the remaining chart and reconciles skipped hold releases. Notes whose judgement windows passed while JS was blocked cannot be recovered; the game may also fail the play |
-| Ashtonk!mania high-key layout collides with `G`/`B`/`X`/`Z` hotkeys | Collision warning is surfaced; rebind the hotkeys in More! → Input |
-| A prepared chart closes, is replaced or has an incompatible feed before starting | Its pending manual start is canceled; auto-start can arm the next valid chart only if enabled |
-| The loader returns or the live chart changes during a run | Keys are released; stale chart input is blocked while the engine pauses or rebuilds |
-| Beatmap fails to download | No chart detected; overlay reports it, no input is produced |
-| Keybind changed mid-run | Desync verifier stops the run rather than playing the wrong columns |
-| Tab backgrounded mid-hold | Keys released and engine safely stopped; restart explicitly after returning |
-| Two columns bound to the same key | Duplicate presses are counted and surfaced in diagnostics instead of double-firing |
-| Humanization shifts a hold's tail past the next press | Clamped during `prepare()`: the release ceiling is the next same-column press, and letting go early is always allowed |
-| Humanization spreads a chord apart | Impossible by construction: one delta per timestamp, shared by every note in the chord |
-| A timing or humanization setting changes mid-run | The scheduler updates from the current playhead. Holds with a future release remain held; any release moved behind the playhead is sent immediately |
+Supported: `https://webosu-online.netlify.app/` and its mirrors
+(`webosu.online`), plus localhost dev servers running the same site. Nothing
+else — the previous osu!mania adapters have been removed.

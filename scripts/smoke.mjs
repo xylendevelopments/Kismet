@@ -3,12 +3,12 @@
  * Smoke test for the SHIPPED BUNDLE.
  *
  * The unit and integration tests exercise the TypeScript sources. This loads
- * `dist/autoplay.js` — the exact bytes a user would inject — into a stubbed
- * browser environment, lets it bootstrap itself against a fake site, and
- * verifies that a chart actually gets played through synthetic keyboard
- * events.
+ * `dist/kismet.js` — the exact bytes a user injects — into a stubbed browser
+ * with a miniature webosu! installed, lets it bootstrap itself, and verifies
+ * that its own chart, clock, scheduler and synthetic input actually play the
+ * chart through the site's own listeners.
  *
- * Run: node scripts/smoke.mjs   (after `npm run build`)
+ * Run: npm run smoke   (builds first)
  */
 
 import { readFile } from "node:fs/promises";
@@ -18,120 +18,37 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 
-const { installDom, StubElement } = await import(
-  pathToFileURL(resolve(root, "test/helpers/domStub.ts")).href
-);
+const { installDom } = await import(pathToFileURL(resolve(root, "test/helpers/domStub.ts")).href);
+const { createSite } = await import(pathToFileURL(resolve(root, "test/helpers/siteStub.ts")).href);
 
 const env = installDom({ start: 0 });
 
 /* ------------------------- browser API surface ------------------------- */
 
-const store = new Map();
-class StubXHR {
-  open() {}
-  send() {}
-  addEventListener() {}
-  removeEventListener() {}
-}
-StubXHR.prototype.open = function () {};
-StubXHR.prototype.send = function () {};
-
 Object.assign(env.window, {
-  XMLHttpRequest: StubXHR,
   MessageChannel: globalThis.MessageChannel,
-  DecompressionStream: globalThis.DecompressionStream,
-  Blob: globalThis.Blob,
-  Response: globalThis.Response,
-  TextDecoder: globalThis.TextDecoder,
-  structuredClone: globalThis.structuredClone,
   matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
   getComputedStyle: () => ({ getPropertyValue: () => "" }),
-  requestIdleCallback: (fn) => env.window.setTimeout(() => fn({ timeRemaining: () => 5 }), 1),
-  cancelIdleCallback: (h) => env.window.clearTimeout(h),
 });
 
 env.globalsInstalled();
-// The bundle reaches for these as bare globals.
-globalThis.MessageChannel = globalThis.MessageChannel;
-globalThis.XMLHttpRequest = StubXHR;
-globalThis.Blob = globalThis.Blob;
-globalThis.Response = globalThis.Response;
-globalThis.TextDecoder = globalThis.TextDecoder;
-globalThis.structuredClone = globalThis.structuredClone;
-globalThis.localStorage = env.window.localStorage;
-globalThis.addEventListener = env.window.addEventListener;
-globalThis.removeEventListener = env.window.removeEventListener;
-globalThis.dispatchEvent = env.window.dispatchEvent;
+globalThis.MessageChannel ??= globalThis.MessageChannel;
 
 /* ------------------------------ fake site ------------------------------ */
 
-const KEYBINDS = ["KeyD", "KeyF", "KeyJ", "KeyK"];
+const OBJECTS = [
+  { type: "circle", x: 120, y: 120, time: 1000 },
+  { type: "circle", x: 380, y: 260, time: 1400 },
+  {
+    type: "slider", x: 100, y: 300, time: 1800, endTime: 2400,
+    sliderTime: 600, endX: 400, endY: 300,
+  },
+  { type: "circle", x: 256, y: 192, time: 2800 },
+  { type: "spinner", x: 256, y: 192, time: 3200, endTime: 4400 },
+  { type: "circle", x: 200, y: 200, time: 4800 },
+];
 
-function makeFakeGame() {
-  const notes = [
-    { type: "tap", column: 0, time: 1000, endTime: 1000 },
-    { type: "tap", column: 1, time: 1200, endTime: 1200 },
-    // A hold, stored the way the site stores it: head tap + hold object.
-    { type: "tap", column: 2, time: 1400, endTime: 2000, isHoldHead: true },
-    { type: "hold", column: 2, time: 1400, endTime: 2000 },
-    { type: "tap", column: 3, time: 1600, endTime: 1600 },
-    { type: "tap", column: 0, time: 2200, endTime: 2200 },
-    { type: "tap", column: 1, time: 2200, endTime: 2200 },
-  ];
-
-  const pressedColumns = [false, false, false, false];
-  const judged = [];
-
-  const onKeyDown = (event) => {
-    if (event.repeat) return;
-    const column = KEYBINDS.indexOf(event.code);
-    if (column < 0 || pressedColumns[column]) return;
-    pressedColumns[column] = true;
-    judged.push({ type: "down", column, at: game.timeElapsed, trusted: event.isTrusted });
-  };
-  const onKeyUp = (event) => {
-    const column = KEYBINDS.indexOf(event.code);
-    if (column < 0 || !pressedColumns[column]) return;
-    pressedColumns[column] = false;
-    judged.push({ type: "up", column, at: game.timeElapsed, trusted: event.isTrusted });
-  };
-  env.document.addEventListener("keydown", onKeyDown);
-  env.document.addEventListener("keyup", onKeyUp);
-
-  const canvas = new StubElement("canvas");
-  env.document.body.appendChild(canvas);
-
-  const game = {
-    state: "PLAY",
-    timeElapsed: 0,
-    startTime: 1000,
-    endTime: 2200,
-    hitObjects: notes,
-    difficulty: { keyCount: 4, od: 7, hp: 7 },
-    columnKeybinds: KEYBINDS.map((code) => [code, null]),
-    settings: {
-      keybinds: { keyModes: [], pause: "Escape", retry: null, toggleHud: null },
-      mods: { autoplay: false, playbackRate: 1 },
-    },
-    mods: { autoplay: false, playbackRate: 1 },
-    inputSystem: { pressedColumns, tappedColumns: [false, false, false, false] },
-    scoreSystem: { score: 0, combo: 0, maxCombo: 0, accuracy: 1, 320: 0, 300: 0, 200: 0, 100: 0, 50: 0, 0: 0 },
-    app: { canvas },
-    replayPlayer: null,
-  };
-
-  env.window.__PIXI_APP__ = { canvas };
-  canvas["__reactFiber$smoke"] = {
-    child: null,
-    sibling: null,
-    return: null,
-    stateNode: canvas,
-    memoizedProps: { game },
-    memoizedState: { memoizedState: game, next: null },
-  };
-
-  return { game, judged, pressedColumns, canvas };
-}
+const site = createSite(env, { objects: OBJECTS });
 
 /* -------------------------------- run ---------------------------------- */
 
@@ -140,8 +57,8 @@ const check = (name, condition, detail = "") => {
   results.push({ name, ok: !!condition, detail });
 };
 
-const bundlePath = resolve(root, "dist/keyfall.js");
-const userscriptPath = resolve(root, "dist/keyfall.user.js");
+const bundlePath = resolve(root, "dist/kismet.js");
+const userscriptPath = resolve(root, "dist/kismet.user.js");
 let code;
 let userscriptCode = "";
 try {
@@ -156,17 +73,37 @@ try {
   // Reported as a failed check below so the rest of the smoke test still runs.
 }
 
-// A saved, previously visible/custom-bound panel must not bypass the new
-// keyboard-only, initially-hidden behavior after an upgrade.
-env.window.localStorage.setItem("keyfall:settings:v1", JSON.stringify({
-  general: { showOverlay: true }, input: { hotkeys: { toggleUI: "KeyM" } },
-}));
-const fake = makeFakeGame();
-// A secondary game binding still conflicts with the fixed panel shortcut,
-// even though it is not part of the primary mapping used for playback.
-fake.game.columnKeybinds[0][1] = "ShiftRight";
+/* ---------------------------- artifact checks -------------------------- */
 
-// Load the bundle exactly as a browser would: as a script in global scope.
+check("userscript artifact exists", userscriptCode.length > 0);
+check("userscript is named Kismet", /@name\s+Kismet/.test(userscriptCode));
+check(
+  "userscript matches webosu-online.netlify.app",
+  userscriptCode.includes("@match        https://webosu-online.netlify.app/*"),
+);
+check("userscript no longer matches the old mania hosts", !/webosumania|ashtonk/i.test(userscriptCode));
+check(
+  "userscript disclaims the site's built-in Autoplay",
+  /never uses the site's built-in Autoplay mod/i.test(userscriptCode),
+);
+check("no legacy Keyfall branding ships", !/keyfall/i.test(userscriptCode) && !/keyfall/i.test(code));
+check(
+  "the UI prefers Torus over its rounded fallback",
+  userscriptCode.includes('"Torus", "Torus Regular", "Torus-Regular", "Kismet Rounded"'),
+);
+check("trainer motion respects reduced-motion preferences", userscriptCode.includes("prefers-reduced-motion"));
+check(
+  "the fallback font is embedded with its license",
+  userscriptCode.includes("data:font/woff2;base64,") && userscriptCode.includes("@license      MIT AND OFL-1.1"),
+);
+
+/* ------------------------------ bootstrap ------------------------------ */
+
+env.window.localStorage.setItem(
+  "kismet:settings:v2",
+  JSON.stringify({ general: { showOverlay: true }, input: { hotkeys: { toggleUI: "KeyM" } } }),
+);
+
 try {
   // eslint-disable-next-line no-new-func
   new Function(code)();
@@ -175,212 +112,119 @@ try {
   check("bundle evaluates without throwing", false, err?.message ?? String(err));
 }
 
-/* ---------------- multi-site shipped-artifact checks ------------------ */
+const api = env.window.Kismet;
+check("exposes window.Kismet", !!api);
 
-check(
-  "bundle contains the Ashtonk!mania adapter",
-  code.includes("AshtonkMania") && code.includes("ashtonkGlobal"),
-);
-check(
-  "userscript still matches Web osu!mania",
-  userscriptCode.includes("@match        https://webosumania.com/*"),
-);
-check(
-  "userscript matches the requested v2 Ashtonk!mania host",
-  userscriptCode.includes("@match        https://v2-ashtonkmania.lokaux.workers.dev/*"),
-);
-check(
-  "userscript uses only valid exact/subdomain @match host patterns",
-  !userscriptCode.includes("@match        https://*ashtonkmania.lokaux.workers.dev/*"),
-);
-check(
-  "userscript description disclaims the sites' built-in Autoplay",
-  /Never uses either site's built-in Autoplay\/Auto mod/.test(userscriptCode),
-);
-check("trainer artwork is embedded in the shipped bundle", userscriptCode.includes("data:image/jpeg;base64,"));
-check("trainer motion respects reduced-motion preferences", userscriptCode.includes("prefers-reduced-motion"));
-check("the UI prefers Torus over its rounded fallback",
-  userscriptCode.includes('"Torus", "Torus Regular", "Torus-Regular", "Keyfall Rounded"'));
-check("all six offline Comfortaa language subsets are embedded",
-  (userscriptCode.match(/data:font\/woff2;base64,/g) ?? []).length === 6);
-const fallbackLicense = await readFile(resolve(root, "assets/fonts/comfortaa/OFL.txt"), "utf8");
-check("the complete fallback font license accompanies both distributed scripts",
-  userscriptCode.includes("@license      MIT AND OFL-1.1") &&
-  userscriptCode.includes(fallbackLicense) && code.includes(fallbackLicense));
-
-const api = env.window.Keyfall;
-check("exposes window.Keyfall", !!api);
+const keydown = (codeName, { trusted = true, repeat = false, ctrlKey = false } = {}) =>
+  env.window.dispatchEvent({
+    type: "keydown", code: codeName, isTrusted: trusted, repeat, ctrlKey,
+    metaKey: false, altKey: false, bubbles: false, defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() { this.__propagationStopped = true; },
+  });
 
 if (api) {
   check("version is reported", typeof api.version === "string" && api.version.length > 0, api.version);
 
   const diag = api.diagnostics();
-  check("site detected", diag.site !== "unknown", String(diag.site));
-  check("game acquired via __PIXI_APP__", diag.via === "pixiGlobal", String(diag.via));
-  check("chart parsed", !!diag.chart, JSON.stringify(diag.chart));
-  check("key count is 4", diag.chart?.keyCount === 4, String(diag.chart?.keyCount));
-  // 7 notes stored, but the hold head must be deduplicated -> 6 logical notes.
-  check("hold head deduplicated (6 notes, not 7)", diag.chart?.notes === 6, String(diag.chart?.notes));
-  check("mapping read from the site", diag.mapping?.source === "site", String(diag.mapping?.source));
-  check("mapping codes match the site keybinds", JSON.stringify(diag.mapping?.codes) === JSON.stringify(KEYBINDS));
-  check("overlay element mounted", !!api.overlayElement);
+  check("site confirmed", diag.site?.verdict === "confirmed", JSON.stringify(diag.site));
+  check("chart found through window.playback", diag.via === "window.playback", String(diag.via));
+  check("chart mirrored", diag.chart?.objects === OBJECTS.length, JSON.stringify(diag.chart));
+  check(
+    "chart counts the object kinds",
+    diag.chart?.circles === 4 && diag.chart?.sliders === 1 && diag.chart?.spinners === 1,
+    JSON.stringify(diag.chart),
+  );
+  check("tap key read from the site", diag.tapKeys?.code === 90 && diag.tapKeys?.source === "site",
+    JSON.stringify(diag.tapKeys));
+  check("a timeline was scheduled", diag.chart?.actions > 0, String(diag.chart?.actions));
+
   const rootEl = api.overlayElement;
-  check("panel starts hidden and inert even for an old visible store",
+  check("overlay mounted", !!rootEl);
+  check("panel starts hidden and inert despite a stored visible flag",
     api.uiVisible === false && rootEl?.dataset.open === "0" && rootEl?.inert === true);
-  check("old custom UI key migrates to Right Shift", api.settings.all.input.hotkeys.toggleUI === "ShiftRight");
-  check("there is no mouse/console showUI launcher", typeof api.showUI === "undefined");
-  check("automatic chart starts are opt-in", api.settings.all.general.autoStart === false);
-  const keydown = (code, { trusted = true, repeat = false, ctrlKey = false } = {}) => {
-    env.window.dispatchEvent({
-      type: "keydown", code, isTrusted: trusted, repeat, ctrlKey, metaKey: false, altKey: false,
-      bubbles: false, defaultPrevented: false,
-      preventDefault() { this.defaultPrevented = true; },
-      stopPropagation() { this.__propagationStopped = true; },
-    });
-  };
+  check("the panel shortcut is fixed to Right Shift",
+    api.settings.all.input.hotkeys.toggleUI === "ShiftRight",
+    String(api.settings.all.input.hotkeys.toggleUI));
+  check("automatic starts are opt-in", api.settings.all.general.autoStart === false);
+
   keydown("KeyM");
-  keydown("ShiftLeft");
   keydown("ShiftRight", { trusted: false });
   keydown("ShiftRight", { repeat: true });
   keydown("ShiftRight", { ctrlKey: true });
-  check("other, synthetic, repeated and modified keys cannot open the panel", api.uiVisible === false);
-  api.settings.set("general.showOverlay", true);
-  check("legacy visibility setting cannot open the panel", api.uiVisible === false);
+  check("only a trusted, unmodified Right Shift opens the panel", api.uiVisible === false);
   keydown("ShiftRight");
-  check("trusted Right Shift opens the panel", api.uiVisible === true && rootEl?.dataset.open === "1" && rootEl?.inert === false);
+  check("trusted Right Shift opens the panel", api.uiVisible === true && rootEl?.dataset.open === "1");
   keydown("ShiftRight");
-  check("trusted Right Shift closes the panel", api.uiVisible === false && rootEl?.dataset.open === "0" && rootEl?.inert === true);
+  check("trusted Right Shift closes it again", api.uiVisible === false);
 
-  fake.game.state = "WAIT";
-  api.start();
-  const status = rootEl?.querySelector('[data-part="status"]');
-  const startButton = rootEl?.querySelector('[data-part="start"]');
-  check("armed start is visible while the game is not yet playable",
-    api.diagnostics().pendingStart === "manual" && status?.textContent === "ARMED");
-  startButton?.dispatchEvent({ type: "click", bubbles: false });
-  check("the queued-start button cancels the pending start",
-    api.diagnostics().pendingStart === null && status?.textContent === "READY");
-  fake.game.state = "PLAY";
-  api.start();
-  check("phase becomes RUNNING", api.phase === "RUNNING", String(api.phase));
-  const notice = rootEl?.querySelector('[data-part="notice"]');
-  check("secondary Right Shift collision stays visible during play",
-    notice?.textContent.includes("Right Shift is fixed") && !notice.classList.contains("wom-hidden"));
-  fake.game.columnKeybinds[0][1] = null;
-  api.settings.set("general.debug", false); // re-check the now-resolved game binding
-  check("resolved hotkey collision clears its warning", notice?.classList.contains("wom-hidden"));
+  /* ------------------------------ playback ------------------------------ */
 
-  // Drive the site's clock forward, one frame at a time.
-  for (let t = 0; t <= 3200; t += 16) {
-    fake.game.timeElapsed = t;
-    env.advance(16);
-    env.frame();
+  site.playback.audioReady = false;
+  api.start();
+  check("start waits for the song", api.diagnostics().pendingStart === "manual" && api.phase === "READY",
+    `${api.diagnostics().pendingStart} / ${api.phase}`);
+  site.playback.audioReady = true;
+  env.advance(200);
+  check("the armed start runs once the song is ready", api.phase === "RUNNING", String(api.phase));
+
+  const seen = [];
+  env.window.addEventListener("keydown", (event) => seen.push({ type: "keydown", trusted: event.isTrusted }));
+  env.window.addEventListener("keyup", (event) => seen.push({ type: "keyup", trusted: event.isTrusted }));
+
+  site.setAudio(600);
+  for (let now = 600; now <= 6400; now += 8) {
+    env.advance(8);
+    site.advanceAudio(8);
+    for (let i = 0; i < 4; i++) env.frame();
   }
 
-  const downs = fake.judged.filter((j) => j.type === "down");
-  const ups = fake.judged.filter((j) => j.type === "up");
-
-  check("notes were played", downs.length >= 6, `${downs.length} presses`);
-  check("every press was released", ups.length === downs.length, `${ups.length} releases vs ${downs.length} presses`);
-  check("no key left stuck", fake.pressedColumns.every((p) => !p), JSON.stringify(fake.pressedColumns));
-  check("all events were synthetic (isTrusted false)", fake.judged.every((j) => j.trusted === false));
-  check("no events used repeat:true", true);
-
-  const columnsPlayed = [...new Set(downs.map((d) => d.column))].sort();
-  check("all four columns were used", columnsPlayed.length === 4, JSON.stringify(columnsPlayed));
-
-  const chord = downs.filter((d) => d.at >= 2200 && d.at <= 2260);
-  check("the simultaneous chord fired both columns", chord.length === 2, `${chord.length} presses at 2200`);
-
-  const holdDown = fake.judged.find((j) => j.type === "down" && j.column === 2);
-  const holdUp = fake.judged.find((j) => j.type === "up" && j.column === 2);
-  check(
-    "the hold spanned its full duration",
-    !!holdDown && !!holdUp && holdUp.at - holdDown.at >= 500,
-    holdDown && holdUp ? `${holdUp.at - holdDown.at}ms` : "missing",
-  );
+  check("the site's own Autoplay was never enabled", site.game.autoplay === false);
+  check("every object was played", site.judged.length === OBJECTS.length,
+    `${site.judged.length} of ${OBJECTS.length}`);
+  const worst = site.judged.reduce((max, click) => Math.max(max, Math.abs(click.diff)), 0);
+  check("clicks landed inside the 300 window", worst < 80, `worst ${worst}ms`);
+  check("the slider was followed", site.sliderError < 12, `${site.sliderError.toFixed(2)}px`);
+  check("nothing was left held", site.isDown() === false);
+  check("all dispatched events were synthetic", seen.every((event) => event.trusted === false),
+    `${seen.length} events`);
+  check("presses and releases balance", seen.filter((e) => e.type === "keydown").length ===
+    seen.filter((e) => e.type === "keyup").length, `${seen.length} events`);
 
   const after = api.diagnostics();
-  check("humanization is off by default", after.humanization?.enabled === false,
+  check("scheduler fired its actions", after.scheduler?.fired > 0, String(after.scheduler?.fired));
+  check("no actions were dropped", after.scheduler?.dropped === 0, String(after.scheduler?.dropped));
+  check("the clock model converged", after.clock?.samples > 5, `${after.clock?.samples} samples`);
+  check("no input failures", after.input?.failures === 0, String(after.input?.failures));
+  check("humanization is off by default",
+    after.humanization === null || after.humanization?.enabled === false,
     JSON.stringify(after.humanization));
-  check("scheduler fired actions", after.scheduler.fired > 0, String(after.scheduler.fired));
-  check("clock model converged", after.clock.samples > 5, `${after.clock.samples} samples`);
-  check("no dropped actions", after.scheduler.dropped === 0, String(after.scheduler.dropped));
-  check("no input failures", after.input.failures === 0, String(after.input.failures));
 
-  /* ------------------- humanization, through the bundle ------------------- */
+  /* ------------------------- safety behaviours -------------------------- */
 
-  api.emergencyStop();
-  fake.judged.length = 0;
-  const exact = fake.judged.filter((j) => j.type === "down").map((j) => j.at);
-
-  // Rebuild the fake clock so the second run starts clean.
-  fake.game.timeElapsed = 0;
-  fake.pressedColumns.fill(false);
-
-  api.settings.set("humanization.enabled", true);
-  api.settings.set("humanization.seed", 20261007);
-  api.settings.set("humanization.strength", 0.8);
-  api.settings.set("humanization.holdReleaseVariation", 1);
-  api.start();
-  check("humanized run reaches RUNNING", api.phase === "RUNNING", String(api.phase));
-
-  for (let t = 0; t <= 3200; t += 16) {
-    fake.game.timeElapsed = t;
-    env.advance(16);
-    env.frame();
-  }
-
-  const humDiag = api.diagnostics();
-  check("humanization reports enabled in diagnostics", humDiag.humanization?.enabled === true,
-    JSON.stringify(humDiag.humanization));
-  // `notes` is on HumanizationStats but deliberately not echoed into
-  // diagnostics — the chart note count is already reported there. Assert on a
-  // field that actually exists.
-  check("humanization statistics are populated", Number.isFinite(humDiag.humanization?.meanAbsMs),
-    String(humDiag.humanization?.meanAbsMs));
-  check("humanization counted the chord and the hold",
-    humDiag.humanization?.patterns?.chordMembers === 1 && humDiag.humanization?.patterns?.holds === 1,
-    JSON.stringify(humDiag.humanization?.patterns));
-  check("humanization produced measurable spread", humDiag.humanization?.sdMs > 0,
-    String(humDiag.humanization?.sdMs));
-  check("the seed is reported back", humDiag.humanization?.seed === 20261007,
-    String(humDiag.humanization?.seed));
-
-  const humDowns = fake.judged.filter((j) => j.type === "down");
-  const humUps = fake.judged.filter((j) => j.type === "up");
-  check("humanized run played the notes", humDowns.length >= 6, `${humDowns.length} presses`);
-  check("humanized run released every press", humUps.length === humDowns.length,
-    `${humUps.length} releases vs ${humDowns.length} presses`);
-  check("humanized run left nothing stuck", fake.pressedColumns.every((p) => !p),
-    JSON.stringify(fake.pressedColumns));
-  check("humanized run dropped no actions", humDiag.scheduler.dropped === 0,
-    String(humDiag.scheduler.dropped));
-
-  // The hold must still be held for roughly its full duration. With release
-  // variation at maximum this is the invariant most likely to break.
-  const humHoldDown = humDowns.find((j) => j.column === 2);
-  const humHoldUp = humUps.find((j) => j.column === 2 && j.at > (humHoldDown?.at ?? 0) + 300);
-  check("the hold survived humanization", !!humHoldUp,
-    humHoldDown ? `down at ${humHoldDown.at}` : "no down");
-  check("no input failures while humanized", humDiag.input.failures === 0,
-    String(humDiag.input.failures));
-
-  // Emergency stop must be clean even after completion.
   api.emergencyStop();
   check("emergency stop returns to IDLE", api.phase === "IDLE", String(api.phase));
-  check("emergency stop leaves nothing held", fake.pressedColumns.every((p) => !p));
+  check("emergency stop leaves nothing held", site.isDown() === false);
+
+  site.game.autoplay = true;
+  env.advance(1600);
+  check("refuses to run while the site autoplays", api.phase === "ERROR", String(api.phase));
+  api.start();
+  check("start is refused under the site's autoplay", api.phase === "ERROR");
+  site.game.autoplay = false;
+  env.advance(1600);
+  check("recovers once the site's autoplay is off", api.phase === "READY", String(api.phase));
 
   api.uninstall();
-  check("uninstall removes the global", !env.window.Keyfall);
-  check("uninstall removes the overlay", !api.overlayElement || !api.overlayElement.isConnected);
+  check("uninstall removes the global", !env.window.Kismet);
+  check("uninstall removes the overlay", !rootEl || !rootEl.isConnected);
 }
 
 /* ------------------------------- report -------------------------------- */
 
 const failed = results.filter((r) => !r.ok);
 console.log("");
-console.log("  Bundle smoke test — dist/keyfall.js");
+console.log("  Bundle smoke test — dist/kismet.js");
 console.log("  " + "─".repeat(62));
 for (const r of results) {
   const mark = r.ok ? "✓" : "✗";
@@ -396,5 +240,6 @@ if (failed.length > 0) {
 }
 console.log("");
 
+site.dispose();
 env.globalsRemoved();
 process.exit(failed.length > 0 ? 1 : 0);

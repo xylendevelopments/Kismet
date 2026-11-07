@@ -6,7 +6,7 @@ import { HotkeyManager } from "../src/hotkeys";
 import { Overlay, type OverlayHost } from "../src/ui/overlay";
 import { MOTION } from "../src/ui/motion";
 import { buildCss } from "../src/ui/styles";
-import type { HotkeyAction, ParsedChart } from "../src/types";
+import type { Chart, HotkeyAction, TapKeys } from "../src/types";
 import { installDom, StubEventTarget, type StubElement, type StubEnvironment } from "./helpers/domStub";
 
 let env: StubEnvironment;
@@ -46,15 +46,24 @@ function createOverlay() {
   return { overlay, settings, calls };
 }
 
-const chart: ParsedChart = {
-  keyCount: 4,
-  notes: [{ type: "tap", column: 0, time: 1000, endTime: 1000 }],
-  noteCount: 1,
+const chart: Chart = {
+  objects: [
+    { index: 0, kind: "circle", x: 100, y: 100, time: 1000, endTime: 1000, sliderDuration: 0, repeat: 0, path: null },
+    { index: 1, kind: "slider", x: 200, y: 150, time: 2000, endTime: 2600, sliderDuration: 600, repeat: 1, path: null },
+  ],
+  noteCount: 2,
+  circles: 1,
+  sliders: 1,
+  spinners: 0,
   startTime: 1000,
-  endTime: 1000,
+  endTime: 2600,
   signature: "chart",
   label: "Test chart",
+  difficulty: { od: 8, ar: 9, cs: 4, hp: 5 },
+  windows: { great: 32, good: 76, meh: 120 },
 };
+
+const tapKeys: TapKeys = { primary: 90, secondary: 88, active: "primary", code: 90, source: "site" };
 
 describe("trainer overlay", () => {
   it("starts hidden and inert; stored visibility and resetting settings cannot open it", () => {
@@ -304,20 +313,20 @@ describe("trainer overlay", () => {
     overlay.dispose(); settings.dispose();
   });
 
-  it("saves column bindings and restores site bindings on re-read", () => {
+  it("shows the site's tap keys, switches the driven key, and re-reads on demand", () => {
     const { overlay, settings, calls } = createOverlay();
-    const mapping = { keyCount: 4, source: "site" as const, codes: ["KeyD", "KeyF", "KeyJ", "KeyK"] };
     overlay.setChart(chart, {
-      taps: 8, holds: 2, chords: 4, largestChord: 2, jacks: 1,
-      longestStream: 3, peakNps: 6, averageNps: 4, minJackInterval: 80,
-    }, mapping);
-    assert.match(find(overlay.root, '[data-part="analysis"]').textContent, /8 taps · 2 holds · 4 chord notes · 1 jacks · peak 6 NPS/);
-    find(overlay.root, '[data-column="0"]').dispatchEvent(event("click"));
-    env.window.dispatchEvent(event("keydown", { code: "KeyQ", isTrusted: true, repeat: false }));
-    assert.deepEqual(settings.all.input.keyMappings["4"], ["KeyQ", "KeyF", "KeyJ", "KeyK"]);
+      circles: 1, sliders: 1, spinners: 0, peakNps: 6, averageNps: 4,
+      longestStream: 2, minGap: 500, longestSlider: 600, maxJump: 120,
+    }, tapKeys);
+    assert.match(find(overlay.root, '[data-part="analysis"]').textContent, /1 circles · 1 sliders · 0 spinners/);
+
+    const secondary = find(overlay.root, '[data-column="secondary"]');
+    secondary.dispatchEvent(event("click"));
+    assert.equal(settings.all.input.tapKey, "secondary");
     assert.equal(calls.filter((call) => call === "mapping").length, 1);
+
     find(overlay.root, '[data-part="reread"]').dispatchEvent(event("click"));
-    assert.equal(settings.all.input.keyMappings["4"], undefined);
     assert.equal(calls.filter((call) => call === "mapping").length, 2);
     overlay.dispose(); settings.dispose();
   });
@@ -337,7 +346,7 @@ describe("trainer overlay", () => {
 
   it("prefers an available Torus font before the bundled rounded fallback", () => {
     const css = buildCss("#ff6b9d");
-    assert.match(css, /font: 13px\/1\.35 "Torus", "Torus Regular", "Torus-Regular", "Keyfall Rounded"/);
+    assert.match(css, /font: 13px\/1\.35 "Torus", "Torus Regular", "Torus-Regular", "Kismet Rounded"/);
     assert.match(css, /button, .* input \{ font-family: inherit/);
   });
 });
@@ -367,12 +376,19 @@ describe("Right Shift hotkey", () => {
     assert.equal(actions.length, 1);
   });
 
-  it("keeps emergency reachable when a window-capture game stops lane propagation", () => {
+  it("keeps emergency reachable when the site stops propagation on its tap key", () => {
     const actions: HotkeyAction[] = [];
     const stoppedLane = (e: any) => { if (e.code === "KeyZ") e.stopPropagation(); };
     env.window.addEventListener("keydown", stoppedLane, true);
     const hotkeys = new HotkeyManager({ onAction: (action) => actions.push(action), getSiteCodes: () => ["KeyZ"] });
-    hotkeys.apply(DEFAULT_SETTINGS); hotkeys.install();
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      input: {
+        ...DEFAULT_SETTINGS.input,
+        hotkeys: { ...DEFAULT_SETTINGS.input.hotkeys, emergency: "KeyZ" },
+      },
+    };
+    hotkeys.apply(settings); hotkeys.install();
     env.window.dispatchEvent(event("keydown", { code: "KeyZ", isTrusted: true, repeat: false }));
     assert.deepEqual(actions, ["emergency"]);
     assert.deepEqual(hotkeys.currentCollisions.map((collision) => collision.code), ["KeyZ"]);
