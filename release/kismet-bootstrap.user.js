@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kismet (bootstrap)
 // @namespace    https://github.com/xylendevelopments/Kismet
-// @version      2.0.2
+// @version      2.0.3
 // @description  Loads the Kismet engine from a CDN. Use this if installing the full userscript fails: it is tiny, it logs to the console, and it works around a truncated paste.
 // @author       tussle1
 // @match        *://webosu-online.netlify.app/*
@@ -26,7 +26,7 @@
   const sources = [
   "https://cdn.jsdelivr.net/gh/xylendevelopments/Kismet@main/release/kismet.user.js",
   "https://raw.githubusercontent.com/xylendevelopments/Kismet/main/release/kismet.user.js"
-].map((url) => url + "?v=2.0.2");
+].map((url) => url + "?v=2.0.3");
   console.info("[Kismet] bootstrap running on " + location.href);
 
   const fail = () => console.error("[Kismet] could not load the engine from any source");
