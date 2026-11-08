@@ -123,9 +123,84 @@ const bookmarklet = `javascript:(function(){try{var s=document.createElement('sc
 
 await writeFile(resolve(root, "dist/bookmarklet.txt"), bookmarklet, "utf8");
 
-// --- devtools snippet loader (the practical bookmarklet) ----------------
-const loader = `javascript:(function(){var s=document.createElement('script');s.src='RAW_URL_HERE/dist/kismet.js';s.onload=function(){console.log('Kismet loaded');};s.onerror=function(){alert('Could not load kismet.js — check the URL and CORS.');};document.documentElement.appendChild(s);})();`;
-await writeFile(resolve(root, "dist/bookmarklet-loader.txt"), loader, "utf8");
+// --- bootstrap userscript (installs even if the big file will not) -------
+// A 370 KB userscript is a lot to paste into Tampermonkey's editor, and a
+// truncated paste fails silently in the browser. This artifact is ~40 lines: it
+// logs that it ran, then loads the engine from a CDN. It doubles as the answer
+// to "is Tampermonkey running anything on this page at all?".
+const ENGINE_URLS = [
+  "https://cdn.jsdelivr.net/gh/xylendevelopments/Kismet@main/release/kismet.user.js",
+  "https://raw.githubusercontent.com/xylendevelopments/Kismet/main/release/kismet.user.js",
+];
+
+const BOOTSTRAP_HEADER = `// ==UserScript==
+// @name         Kismet (bootstrap)
+// @namespace    https://github.com/xylendevelopments/Kismet
+// @version      ${pkg.version}
+// @description  Loads the Kismet engine from a CDN. Use this if installing the full userscript fails: it is tiny, it logs to the console, and it works around a truncated paste.
+// @author       tussle1
+// @match        *://webosu-online.netlify.app/*
+// @match        *://webosu.online/*
+// @match        *://*.webosu.online/*
+// @match        http://localhost/*
+// @match        http://127.0.0.1/*
+// @include      http://localhost:*/*
+// @include      http://127.0.0.1:*/*
+// @run-at       document-start
+// @grant        none
+// @noframes
+// @license      MIT
+// ==/UserScript==
+`;
+
+const bootstrap = `${BOOTSTRAP_HEADER}
+(() => {
+  "use strict";
+  if (window.Kismet) {
+    console.info("[Kismet] engine already running");
+    return;
+  }
+  const sources = ${JSON.stringify(ENGINE_URLS, null, 2)}.map((url) => url + "?v=${pkg.version}");
+  console.info("[Kismet] bootstrap running on " + location.href);
+
+  const fail = () => console.error("[Kismet] could not load the engine from any source");
+
+  const load = (index) => {
+    if (index >= sources.length) return fail();
+    const script = document.createElement("script");
+    script.src = sources[index];
+    script.async = false;
+    script.onload = () => console.info("[Kismet] engine loaded from " + sources[index].split("?")[0]);
+    script.onerror = () => {
+      console.warn("[Kismet] failed: " + sources[index].split("?")[0]);
+      load(index + 1);
+    };
+    (document.head || document.documentElement).appendChild(script);
+  };
+
+  load(0);
+})();
+`;
+
+await writeFile(resolve(root, "dist/kismet-bootstrap.user.js"), bootstrap, "utf8");
+await mkdir(resolve(root, "release"), { recursive: true });
+await writeFile(resolve(root, "release/kismet-bootstrap.user.js"), bootstrap, "utf8");
+
+// --- bookmarklet (no userscript manager required) -----------------------
+// Points at the CDN copy of the engine, so the bookmark URL stays short enough
+// for every browser to accept as a bookmark.
+const loader =
+  "javascript:(function(){if(window.Kismet){return console.info('[Kismet] already running');}" +
+  "var urls=" + JSON.stringify(ENGINE_URLS) + ",i=0;" +
+  "function next(){if(i>=urls.length){return alert('Could not load Kismet.');}" +
+  "var s=document.createElement('script');s.src=urls[i++]+'?v=${pkg.version}';" +
+  "s.onerror=next;s.onload=function(){};(document.head||document.documentElement).appendChild(s);}" +
+  "next();})();";
+await writeFile(
+  resolve(root, "dist/bookmarklet-loader.txt"),
+  loader.replace(/\$\{pkg\.version\}/g, pkg.version),
+  "utf8",
+);
 
 const kb = (n) => `${(n / 1024).toFixed(1)} KB`;
 console.log("");
@@ -133,12 +208,13 @@ console.log(`  dist/kismet.user.js        ${kb(Buffer.byteLength(userscript))}`)
 console.log(`  dist/kismet.js             ${kb(Buffer.byteLength(code))}`);
 console.log(`  dist/bookmarklet.txt        ${kb(Buffer.byteLength(bookmarklet))}`);
 console.log(`  dist/bookmarklet-loader.txt ${kb(Buffer.byteLength(loader))}`);
+console.log(`  dist/kismet-bootstrap.user.js ${kb(Buffer.byteLength(bootstrap))}`);
 
 if (Buffer.byteLength(bookmarklet) > 60_000) {
   console.log("");
   console.log("  ⚠ The inline bookmarklet is large. Many browsers truncate bookmark URLs");
-  console.log("    past ~64KB. Prefer the userscript, or host dist/kismet.js and use");
-  console.log("    dist/bookmarklet-loader.txt with RAW_URL_HERE replaced.");
+  console.log("    past ~64KB. Prefer the userscript, or dist/bookmarklet-loader.txt,");
+  console.log("    which loads the engine from the CDN instead of inlining it.");
 }
 
 if (watch) {

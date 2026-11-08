@@ -57,11 +57,33 @@ The site judges the result exactly as if a human had clicked.
 3. Open <https://webosu-online.netlify.app/>, start a beatmap, press
    **Right Shift**, and hit **Start** in the panel.
 
-### Bookmarklet
+### If the full userscript will not install
 
-`dist/bookmarklet.txt` is the whole engine in one `javascript:` URL.
-`dist/bookmarklet-loader.txt` is a small loader for a hosted `dist/kismet.js`
-(replace `RAW_URL_HERE` with the raw URL).
+A 361 KB userscript is a lot to paste into a script manager: a truncated paste
+fails silently, and nothing appears in the console. Two smaller artifacts exist
+for exactly that case, and both double as the answer to *"is Tampermonkey
+running anything on this page at all?"* — they print a line before doing
+anything else.
+
+**Bootstrap userscript (~1.7 KB)** — installs like any other script, then loads
+the engine from the CDN:
+
+```
+https://raw.githubusercontent.com/xylendevelopments/Kismet/main/release/kismet-bootstrap.user.js
+```
+
+It logs `[Kismet] bootstrap running on <url>`, then `[Kismet] engine loaded
+from …`. If neither line appears, the script manager is not running scripts on
+that page and no version of the engine can help.
+
+**Bookmarklet** — no script manager involved. Create a bookmark whose URL is
+the contents of `dist/bookmarklet-loader.txt` (a single `javascript:` line), and
+click it on the game page. `dist/bookmarklet.txt` is the self-contained variant,
+but at 420 KB most browsers truncate it, so the loader is the practical one.
+
+**Console** — paste `dist/kismet.js` (or the body of `release/kismet.user.js`)
+into DevTools on the game page. Nothing to install, and it proves the engine
+works on the live site independently of any manager.
 
 ### Console
 

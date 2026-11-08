@@ -114,3 +114,33 @@ describe("release/kismet.user.js", () => {
     assert.ok(text.includes("Kismet"), "the bundle banner should name the tool");
   });
 });
+
+describe("release/kismet-bootstrap.user.js", () => {
+  const bootstrapPath = resolve(root, "release", "kismet-bootstrap.user.js");
+  const ENGINE = "https://cdn.jsdelivr.net/gh/xylendevelopments/Kismet@main/release/kismet.user.js";
+
+  it("is a small, valid userscript for the same site", async () => {
+    const text = await readFile(bootstrapPath, "utf8");
+    const lines = headerLines(text);
+    assert.deepEqual(directive(lines, "name"), ["Kismet (bootstrap)"]);
+    assert.ok(text.length < 8_000, `the bootstrap must stay tiny (${text.length} bytes)`);
+
+    for (const pattern of directive(lines, "match")) {
+      assert.match(pattern, MATCH_PATTERN, `invalid @match: ${pattern}`);
+    }
+    assert.ok(directive(lines, "match").some((pattern) => pattern.includes("webosu-online.netlify.app")));
+  });
+
+  it("loads the engine from the CDN and says so in the console", async () => {
+    const text = await readFile(bootstrapPath, "utf8");
+    assert.ok(text.includes(ENGINE), "must point at the published engine");
+    assert.match(text, /console\.info\("\[Kismet\] bootstrap running on "/);
+    assert.match(text, /if \(window\.Kismet\)/, "must not load the engine twice");
+  });
+
+  it("parses as JavaScript", async () => {
+    const text = await readFile(bootstrapPath, "utf8");
+    const body = text.slice(text.indexOf("// ==/UserScript==") + "// ==/UserScript==".length);
+    assert.doesNotThrow(() => new Function(body));
+  });
+});

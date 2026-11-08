@@ -92,6 +92,31 @@ check(
   userscriptCode.includes('"Torus", "Torus Regular", "Torus-Regular", "Kismet Rounded"'),
 );
 check("trainer motion respects reduced-motion preferences", userscriptCode.includes("prefers-reduced-motion"));
+{
+  let loader = "";
+  try {
+    loader = await readFile(resolve(root, "dist/bookmarklet-loader.txt"), "utf8");
+  } catch {
+    // reported below
+  }
+  check("the loader bookmarklet exists", loader.startsWith("javascript:"), loader.slice(0, 24));
+  check(
+    "the loader points at the published engine, not a local file",
+    loader.includes("cdn.jsdelivr.net/gh/xylendevelopments/Kismet@main/release/kismet.user.js"),
+  );
+  check("the loader fits in a bookmark URL", loader.length < 2_000, `${loader.length} chars`);
+}
+
+{
+  let bootstrap = "";
+  try {
+    bootstrap = await readFile(resolve(root, "dist/kismet-bootstrap.user.js"), "utf8");
+  } catch {
+    // reported below
+  }
+  check("the bootstrap userscript is shipped", /@name\s+Kismet \(bootstrap\)/.test(bootstrap));
+  check("the bootstrap is small enough to paste", bootstrap.length > 0 && bootstrap.length < 8_000, `${bootstrap.length} bytes`);
+}
 check(
   "the fallback font is embedded with its license",
   userscriptCode.includes("data:font/woff2;base64,") && userscriptCode.includes("@license      MIT AND OFL-1.1"),
