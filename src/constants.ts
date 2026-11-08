@@ -2,7 +2,7 @@ import { DEFAULT_HUMANIZATION } from "./humanize/humanizer";
 import type { Settings } from "./types";
 
 export const NAME = "Kismet";
-export const VERSION = "2.0.0";
+export const VERSION = "2.0.1";
 
 /** The site this tool drives. */
 export const SITE_NAME = "webosu!";

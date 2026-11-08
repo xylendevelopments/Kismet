@@ -79,7 +79,7 @@ check("userscript artifact exists", userscriptCode.length > 0);
 check("userscript is named Kismet", /@name\s+Kismet/.test(userscriptCode));
 check(
   "userscript matches webosu-online.netlify.app",
-  userscriptCode.includes("@match        https://webosu-online.netlify.app/*"),
+  /@match\s+\*:\/\/webosu-online\.netlify\.app\/\*/.test(userscriptCode),
 );
 check("userscript no longer matches the old mania hosts", !/webosumania|ashtonk/i.test(userscriptCode));
 check(
