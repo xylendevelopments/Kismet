@@ -1,6 +1,6 @@
 {
   "name": "kismet",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "private": true,
   "type": "module",
   "description": "Kismet \u2014 its own cursor-and-click autoplay for webosu! (osu!standard in the browser). Drives the site's own input listeners; never uses the site's built-in Autoplay mod.",
@@ -9,7 +9,7 @@
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "test": "node --import=./test/helpers/register.mjs --test test/*.test.ts",
-    "smoke": "npm run build && node --import=./test/helpers/register.mjs scripts/smoke.mjs",
+    "smoke": "npm run build && node --import=./test/helpers/register.mjs scripts/smoke.mjs && node scripts/jsdom-smoke.mjs",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test && npm run smoke",
     "demo": "node scripts/demo-server.mjs"
@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
+    "jsdom": "^31.0.0",
     "typescript": "^5.7.0"
   }
 }

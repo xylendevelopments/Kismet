@@ -295,6 +295,36 @@ function boot(win: Window): Bootstrapped | null {
     stop: () => engine.stop(),
     emergencyStop: () => engine.emergencyStop("EMERGENCY STOP (console)"),
     diagnostics: () => engine.getDiagnostics(),
+    /**
+     * Everything needed to explain a run that is not working, in a shape that
+     * survives a copy-paste out of DevTools. `Kismet.report()` in the console.
+     */
+    report: () => {
+      const diagnostics = engine.getDiagnostics() as Record<string, any>;
+      const win = window as unknown as Record<string, unknown>;
+      return {
+        tool: `${NAME} v${VERSION}`,
+        url: location.href,
+        frame: window.top === window.self ? "top" : "child",
+        globals: {
+          game: !!win.game,
+          playback: !!win.playback,
+          gfx: !!win.gfx,
+          app: !!win.app,
+          scene: !!(win.game as { scene?: unknown } | undefined)?.scene,
+        },
+        phase: diagnostics.phase,
+        pendingStart: diagnostics.pendingStart,
+        site: diagnostics.site,
+        via: diagnostics.via,
+        blocker: diagnostics.blocker,
+        chart: diagnostics.chart,
+        tapKeys: diagnostics.tapKeys,
+        siteState: diagnostics.siteState,
+        lastError: diagnostics.lastError,
+        overlay: { mounted: !!overlay?.root?.isConnected, visible: overlay?.isVisible ?? false },
+      };
+    },
     stats: () => engine.getStats(),
     get phase() {
       return engine.currentPhase;
@@ -336,6 +366,16 @@ function boot(win: Window): Bootstrapped | null {
 
 function main(): void {
   try {
+    // Unconditional, first line: if this never appears, the script is not
+    // running on this page at all (not installed, or not matched).
+    let where = "unknown page";
+    try {
+      where = window.location?.href ?? where;
+      if (window.top !== window.self) where += " (inside a frame)";
+    } catch {
+      /* cross-origin frame: the URL is not readable, which is fine */
+    }
+    console.info(`[${NAME}] v${VERSION} booting on ${where}`);
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", () => boot(window), { once: true });
     } else {
