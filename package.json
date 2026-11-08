@@ -1,6 +1,6 @@
 {
   "name": "kismet",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "private": true,
   "type": "module",
   "description": "Kismet \u2014 its own cursor-and-click autoplay for webosu! (osu!standard in the browser). Drives the site's own input listeners; never uses the site's built-in Autoplay mod.",

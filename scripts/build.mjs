@@ -72,7 +72,9 @@ const baseOptions = {
   entryPoints: [resolve(root, "src/main.ts")],
   bundle: true,
   format: "iife",
-  target: ["es2022", "chrome110", "firefox115", "safari16.4"],
+  // Deliberately conservative: a userscript that fails to *parse* does not
+  // log anything, so an older browser looks exactly like a broken install.
+  target: ["es2019", "chrome80", "firefox78", "safari14"],
   platform: "browser",
   legalComments: "none",
   logLevel: "info",

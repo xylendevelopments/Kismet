@@ -86,6 +86,11 @@ check(
   "userscript disclaims the site's built-in Autoplay",
   /never uses the site's built-in Autoplay mod/i.test(userscriptCode),
 );
+check(
+  "bundle parses on older browsers (no es2022-only syntax)",
+  !code.includes("?.") && !code.includes("??") && !code.includes("static {"),
+  "found optional chaining, nullish coalescing or a static block",
+);
 check("no legacy Keyfall branding ships", !/keyfall/i.test(userscriptCode) && !/keyfall/i.test(code));
 check(
   "the UI prefers Torus over its rounded fallback",
